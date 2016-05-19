@@ -37,7 +37,7 @@ real, allocatable, dimension(:)         :: solflxband, qo3_file_pfull
 real, allocatable, dimension(:,:)       :: pref, rad_lon, rad_lat, rad_lonb, rad_latb
 real, allocatable, dimension(:,:,:)     :: deltaz, qo3, t_half, qo3_out
 real, allocatable, dimension(:,:)       :: albedo_vis_dir, albedo_nir_dir, albedo_vis_dif, albedo_nir_dif
-real, allocatable, dimension(:,:)       :: skc_forcing ! 01-25-2016 [SKC]: Impose forcing on top of solar radiation
+real, allocatable, dimension(:,:)       :: skc_forcing, asym_forcing ! 04-29-2016 [ZS]: Impose forcing on top of solar radiation
 real, allocatable, dimension(:,:,:)     :: cmxolw
 real, allocatable, dimension(:,:,:,:)   :: camtsw, crndlw
 real, allocatable, dimension(:,:,:,:,:) :: cldsctsw, cldextsw, cldasymmsw, emrndlw, emmxolw
@@ -70,13 +70,17 @@ logical :: renormalize_sw_fluxes = .true.
 logical :: do_clear_sky_pass = .false.
 real :: solar_constant = 1365.0
 real :: albedo_sw = 0.38
-real :: skc_tropics_mag = 0.0
-real :: skc_extratropics_mag = 0.0
+logical :: do_asym_forcing = .false.
+real :: asym_forcing_mag = 0.0
+real :: asym_forcing_center = 0.0
+real :: asym_forcing_width = 0.0
+real :: asym_forcing_sf = 1.0
 character(len=16) :: ozone_option = 'from_ext_file' ! valid options are 'from_ext_file' and 'computed' 
 
 namelist /full_radiation_driver_nml/ do_conserve_energy, rch4, rn2o, rco2, rf11, rf12, rf113, rf22, &
               do_ch4, do_n2o, do_co2, do_cfc, do_h2o_lw, do_o3_lw, do_co2_10um, lw_rad_time_step, sw_rad_time_step, &
-              renormalize_sw_fluxes, do_clear_sky_pass, solar_constant, ozone_option, albedo_sw, skc_tropics_mag, skc_extratropics_mag
+              renormalize_sw_fluxes, do_clear_sky_pass, solar_constant, ozone_option, albedo_sw, &
+              do_asym_forcing, asym_forcing_mag, asym_forcing_center, asym_forcing_width, asym_forcing_sf ! 04-29-2016 [ZS]: add asym forcing parameters
 
 contains
 !=================================================================================================================================
@@ -206,6 +210,7 @@ type(axistype),  allocatable :: qo3_file_axes(:)
 
 ! 01-25-2016 [SKC]: Compute forcing.
  allocate(skc_forcing (nx,ny))
+ allocate(asym_forcing (nx,ny))
 
  id_qo3 = register_diag_field('full_radiation_driver', 'qo3', axes(1:3), Time, 'Ozone mixing ratio', 'Kg ozone/Kg air')
  if(.not.file_exist('INPUT/ape_O3.nc')) then
@@ -268,7 +273,7 @@ character(len=24) :: label
 logical :: used
 integer :: i,j,k
 real, dimension(size(sphum,1),size(sphum,2),size(sphum,3)) :: sphum2 
-real :: c_tropics, c_extratropics, mid_tropics, mid_extratropics, m0_tropics, m0_extratropics ! 01-25-2016 [SKC]: Add variables to compute skc_forcing
+real :: c_asym_forcing, mid_asym_forcing ! 04-29-2016 [ZS]: Add variables to compute skc_forcing
  Time_diag = Time + Time_step
  call get_time(Time_step, seconds, days)
  time_step_int = seconds + seconds_per_day*days
@@ -347,15 +352,15 @@ real :: c_tropics, c_extratropics, mid_tropics, mid_extratropics, m0_tropics, m0
  endif
 !    call print_date(Time, label(1:15)//' LW')
 
-! 01-25-2016 [SKC]: Compute shortwave forcing
-m0_tropics = 0.10404437315447089
-m0_extratropics = 0.10653171090667758
-mid_tropics = 15.0 * 3.1415927 / 180.0
-mid_extratropics = 60.0 * 3.1415927 / 180.0
-c_tropics = 30.0 * 3.1415927 / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
-c_extratropics = 60.0 * 3.1415927 / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
-skc_forcing(:,:) = 3.1415927 * ((-1.0 * (skc_tropics_mag / m0_tropics) * exp(-(rad_lat(:,:) - mid_tropics)**2 / (2.0 * (c_tropics**2)))) - ((skc_extratropics_mag / m0_extratropics) * &
-      exp(-(rad_lat(:,:) - mid_extratropics)**2 / (2.0 * (c_extratropics**2))))) / (cos(rad_lat(:,:)))
+! 04-29-2016 [ZS]: Compute shortwave forcing
+if (do_asym_forcing) then
+   mid_asym_forcing = asym_forcing_center * PI / 180.0
+   c_asym_forcing = asym_forcing_width * PI / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
+   asym_forcing(:,:) =  - (asym_forcing_mag / asym_forcing_sf) * exp(-(rad_lat(:,:) - mid_asym_forcing)**2 / (2.0 * (c_asym_forcing**2)))
+   skc_forcing(:,:) = PI * asym_forcing(:,:) / (cos(rad_lat(:,:)))
+else
+   skc_forcing(:,:) = 0
+endif
 !
 
  if (Rad_control%do_sw_rad) then
