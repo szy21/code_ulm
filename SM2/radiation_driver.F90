@@ -62,7 +62,8 @@ use time_manager_mod,      only: time_type, set_date, set_time,  &
 use sat_vapor_pres_mod,    only: sat_vapor_pres_init, compute_qs
 use constants_mod,         only: constants_init, RDGAS, RVGAS,   &
                                  STEFAN, GRAV, SECONDS_PER_DAY,  &
-                                 RADIAN, diffac
+                                 RADIAN, diffac, &
+                                 PI    ! 052416[ZS]: constant used to calculate local forcing
 use data_override_mod,     only: data_override
 
 ! shared radiation package modules:
@@ -384,6 +385,12 @@ character(len=16) :: cosp_precip_sources = '    '
                                ! sources.
 
 
+logical     :: add_solar_forcing = .false.
+real        :: solar_forcing_mag = 0.0
+real        :: solar_forcing_center = 0.0
+real        :: solar_forcing_width = 0.0
+real        :: solar_forcing_sf = 1.0
+
 ! <NAMELIST NAME="radiation_driver_nml">
 !  <DATA NAME="rad_time_step" UNITS="" TYPE="integer" DIM="" DEFAULT="14400">
 !The radiative time step in seconds.
@@ -508,7 +515,9 @@ namelist /radiation_driver_nml/ do_radiation, &
                                 lat_for_solar_input, lon_for_solar_input, &
                                 rad_time_step, sw_rad_time_step, use_single_lw_sw_ts, &
                                 nonzero_rad_flux_init, &
-                                cosp_precip_sources
+                                cosp_precip_sources, &
+                                add_solar_forcing, & ! 052416[ZS]: add solar forcing parameters
+                                solar_forcing_mag, solar_forcing_center, solar_forcing_width, solar_forcing_sf
 !---------------------------------------------------------------------
 !---- public data ----
 
@@ -1877,6 +1886,9 @@ real, dimension(:),       pointer :: gavg_rrv
 real, dimension(:,:,:),   pointer :: t, p_full, p_half, z_full, z_half, q
 real, dimension(:,:,:,:), pointer :: r, rm
 
+! 052416[ZS]: perturb solar radiation
+real, dimension(ie-is+1,je-js+1)    :: solar_forcing, scaled_solar_forcing, cosz_ann, solar_ann, fracday_ann
+real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
                 
 !-------------------------------------------------------------------
 !   local variables:
@@ -2076,6 +2088,17 @@ real, dimension(:,:,:,:), pointer :: r, rm
 !    tive fluxes and heating rates.
 !---------------------------------------------------------------------
       call mpp_clock_begin (calc_clock)
+      !++zs: add asymmetric forcing [052416]
+      if (add_solar_forcing) then
+         solar_forcing_center_rad = solar_forcing_center * PI / 180.0
+         c_solar_forcing = solar_forcing_width * PI / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
+         solar_forcing(:,:) =  exp(-(lat(:,:) - solar_forcing_center_rad)**2 / (2.0 * (c_solar_forcing**2)))
+         call annual_mean_solar (js, je, lat, cosz_ann, solar_ann, fracday_ann, rrsun_ann)
+         scaled_solar_forcing(:,:) = solar_forcing / solar_ann * solar_forcing_mag * (1/solar_forcing_sf)
+      else
+         scaled_solar_forcing(:,:) = 0
+      endif
+      !--zs
       if (do_rad) then
         call radiation_calc (is, ie, js, je, lat, lon, &
                              Atmos_input%press, Atmos_input%pflux,  &
@@ -2089,7 +2112,8 @@ real, dimension(:,:,:,:), pointer :: r, rm
                              aeroasymfac, aerosctopdep, aeroextopdep, &
                              crndlw, cmxolw, emrndlw, emmxolw, &
                              camtsw, cldsctsw, cldextsw, cldasymmsw, &
-                             Rad_output, Lw_output, Sw_output, Lw_diagnostics)
+                             Rad_output, Lw_output, Sw_output, Lw_diagnostics,&
+                             scaled_solar_forcing)  ! 052416[ZS]
       endif
       call mpp_clock_end (calc_clock)
 
@@ -4336,7 +4360,8 @@ subroutine radiation_calc (is, ie, js, je, lat, lon, &
                            aeroasymfac, aerosctopdep, aeroextopdep, &
                            crndlw, cmxolw, emrndlw, emmxolw, &
                            camtsw, cldsct, cldext, cldasymm, &
-                           Rad_output, Lw_output, Sw_output, Lw_diagnostics)
+                           Rad_output, Lw_output, Sw_output, Lw_diagnostics,&
+                           local_solar_forcing) ! 052416[ZS]
 
 !--------------------------------------------------------------------
 !    radiation_calc is called on radiation timesteps and calculates
@@ -4371,6 +4396,7 @@ type(rad_output_type),         intent(inout)         :: Rad_output
 type(lw_output_type), dimension(:), intent(inout)    :: Lw_output
 type(sw_output_type), dimension(:), intent(inout)    :: Sw_output
 type(lw_diagnostics_type),          intent(inout)    :: Lw_diagnostics
+real, dimension(:,:),          intent(in)            :: local_solar_forcing
 
 !-----------------------------------------------------------------------
 !    intent(in) variables:
@@ -4444,7 +4470,8 @@ type(lw_diagnostics_type),          intent(inout)    :: Lw_diagnostics
                         crndlw, cmxolw, emrndlw, emmxolw, &
                         camtsw, cldsct, cldext, cldasymm, &
                         flag_stoch, Rad_control, Aerosolrad_control, &
-                        Lw_output, Sw_output, Lw_diagnostics)
+                        Lw_output, Sw_output, Lw_diagnostics, &
+                        local_solar_forcing)
 
 
 !---------------------------------------------------------------------

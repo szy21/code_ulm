@@ -23,33 +23,30 @@
 
 !    shared modules:
 
-use mpp_mod,              only:  input_nml_file, mpp_chksum
+use mpp_mod,              only:  input_nml_file
 use fms_mod,              only:  open_namelist_file, fms_init, &
                                  mpp_pe, mpp_root_pe, stdlog, &
                                  file_exist, write_version_number, &
                                  check_nml_error, error_mesg, &
-                                 FATAL, NOTE, close_file, string, stdout
+                                 FATAL, close_file
 use constants_mod,        only:  PI, GRAV, radcon_mks, o2mixrat, &
                                  rhoair, pstd_mks, WTMAIR, &
                                  constants_init
 
 !  shared radiation package modules:
 
-use esfsw_parameters_mod, only:  esfsw_parameters_init, &
+use esfsw_parameters_mod, only:  Solar_spect, esfsw_parameters_init, &
                                  esfsw_parameters_end
-
-use esfsw_bands_mod,      only:  esfsw_bands_init, &
-                                 esfsw_bands_end, &
-                                 esfsw_bands, &
-                                 esfsw_number_of_bands, &
-                                 esfsw_band_segments, &
-                                 esfsw_solar_flux, &
-                                 esfsw_thickavg
-
-use esfsw_utilities_mod,  only:  esfsw_utilities_init, &
-                                 esfsw_utilities_end, &
-                                 sw_output_type, &
-                                 assignment(=)
+use rad_utilities_mod,    only:  Rad_control, rad_utilities_init, &
+                                 cldrad_properties_type, &
+                                 cld_specification_type, &
+                                 astronomy_type, &
+                                 aerosol_diagnostics_type, &
+                                 radiative_gases_type, &
+                                 aerosol_type, aerosol_properties_type,&
+                                 Cldrad_control, &
+                                 atmos_input_type, surface_type, &
+                                 sw_output_type, Sw_control
 !---------------------------------------------------------------------
 
 implicit none
@@ -64,8 +61,8 @@ private
 !---------------------------------------------------------------------
 !----------- version number for this module -------------------
 
-character(len=128)  :: version =  '$Id$'
-character(len=128)  :: tagname =  '$Name$'
+character(len=128)  :: version =  '$Id: esfsw_driver.F90,v 21.0 2014/12/15 21:44:22 fms Exp $'
+character(len=128)  :: tagname =  '$Name: ulm $'
 
 
 !---------------------------------------------------------------------
@@ -80,24 +77,14 @@ private     &
 !   called from swresf:
          adding, deledd
 
-!---------------------------------------------------------------------
-!  public interfaces/derived-types/assignments
-!       inherited from other modules
-
-public  &
-  !  from esfsw_bands_mod
-        esfsw_number_of_bands, &
-        esfsw_bands, &
-        esfsw_band_segments, &
-        esfsw_solar_flux, &
-        esfsw_thickavg, &
-  !  from esfsw_utilities_mod
-        sw_output_type, &
-        assignment(=)
 
 !---------------------------------------------------------------------
 !-------- namelist  ---------
 
+ logical     ::  do_ica_calcs=.false.           ! do independent column
+                                                ! calculations when sto-
+                                                ! chastic clouds are
+                                                ! active ?
 logical      ::  do_rayleigh_all_bands = .true. ! rayleigh scattering 
                                                 ! calculated in all sw 
                                                 ! bands ?
@@ -108,31 +95,19 @@ logical      ::  do_quench = .false.            ! include the quenching
                                                 ! effect of non-LTE 
                                                 ! processes on the co2 
                                                 ! optical depth ?
-logical      ::  do_h2o_sw_effects = .true.     ! the shortwave effects
-                                                ! of h2o are included ?
-logical      ::  do_o3_sw_effects =  .true.     ! the shortwave effects
-                                                ! of o3 are included ?
-logical      ::  do_co2_sw_effects = .true.     ! the shortwave effects
-                                                ! of co2 are included ?                                         
-logical      ::  do_o2_sw_effects = .true.      ! the shortwave effects
-                                                ! of o2 are included ?
 logical      ::  do_ch4_sw_effects = .false.    ! the shortwave effects
                                                 ! of ch4 are included ?
 logical      ::  do_n2o_sw_effects = .false.    ! the shortwave effects
                                                 ! of n2o are included ?
 logical      ::  do_sw_continuum =  .false.      ! include the shortwave
 						 ! continuum? 						 
-logical      ::  do_rayleigh     = .true.       ! is rayleigh scattering
-                                                ! turned on? 
-logical      ::  reproduce_ulm   = .true.       ! reproduce ulm code
                                                  
+
 namelist / esfsw_driver_nml /    &
-                               do_rayleigh_all_bands, &
+                               do_ica_calcs, do_rayleigh_all_bands, &
                                do_herzberg, do_quench, &
-                               do_h2o_sw_effects, do_o3_sw_effects, &
                                do_ch4_sw_effects, do_n2o_sw_effects, &
-                               do_co2_sw_effects, do_o2_sw_effects, &
-                               do_sw_continuum, do_rayleigh, reproduce_ulm
+                               do_sw_continuum
 
 !---------------------------------------------------------------------
 !------- public data ------
@@ -189,12 +164,8 @@ real, dimension (:), allocatable    :: c1co2, c1co2str, c1o2, c1o2str, &
                                        powph2o, p0h2o
 real                                :: c1o2strschrun, c2o2strschrun, &
                                        c3o2strschrun, c4o2strschrun
-real, dimension (:), allocatable    :: kh2o, ko3, kctms, kctmf, wtfreq
+real, dimension (:), allocatable    :: kh2o, ko3,kctms, kctmf, wtfreq
 logical, dimension(:), allocatable  :: strterm
-real, dimension (:), allocatable    :: powpco2, p0co2
-real, dimension (:,:), allocatable  :: kco2, wtfreqco2
-integer, dimension (:), allocatable :: nfreqptsco2
-logical, dimension(:,:), allocatable:: strtermco2
 
 !---------------------------------------------------------------------
 !    quantities associated with solar spectral parameterization
@@ -213,11 +184,14 @@ logical, dimension(:,:), allocatable:: strtermco2
 !                 defining band-averaged optical parameters. If the
 !                 solar constant is time-invariant, it is also the solar
 !                 flux in each parameterization band (solflxband).
+! vis_wvnum    = the wavenumber of visible light (corresponds to
+!                wavelength of 0.55 microns) [ cm **(-1) ]
 !---------------------------------------------------------------------
 real                                :: refquanray, solflxtotal
 integer                             :: firstrayband, nirbands
 integer, dimension (:), allocatable :: nfreqpts
 real,    dimension(:), allocatable  :: solflxband
+real,    dimension(:), allocatable  :: solflxbandref
 real, dimension(:), allocatable     :: wtstr, cosangstr
 real, dimension(4)                  :: wtstr_4 =      &
                                        (/0.347854845, 0.652145155,&
@@ -225,9 +199,15 @@ real, dimension(4)                  :: wtstr_4 =      &
 
 integer :: nbands, tot_wvnums, nfrqpts, nh2obands, nstreams
 logical :: nstr4 = .false.
+real    :: vis_wvnum = 1.0E+04/0.55
+real    :: wvnum_870 = 1.0E+04/0.87
+real    :: wvnum_340 = 1.0E+04/0.34
+real    :: wvnum_380 = 1.0E+04/0.38
+real    :: wvnum_440 = 1.0E+04/0.44
+real    :: wvnum_670 = 1.0E+04/0.67
+real    :: one_micron_wvnum = 1.0E+04/1.00
+real    :: onepsix_micron_wvnum = 1.0E+04/1.61
 integer :: onepsix_band_indx
-integer :: visible_band_indx
-integer :: nco2bands
 
 !---------------------------------------------------------------------
 !    variables associated with rayleigh scattering
@@ -251,7 +231,6 @@ real, dimension(:), allocatable :: totco2max, totco2strmax, &
 !    is done only when do_herzberg is true.
 !----------------------------------------------------------------------
 real, parameter   :: wtmo2        = 3.19988E+01  
-real, parameter   :: wtmco2       = 4.40098E+01
 real, parameter   :: herzberg_fac = 9.9488377E-3
 
 !----------------------------------------------------------------------
@@ -282,6 +261,7 @@ integer, parameter :: NSOLWG = 1
 real, dimension(NSOLWG) :: gausswt
 logical        :: module_is_initialized = .false.
 logical        :: do_esfsw_band_diagnostics = .false.
+integer        :: naerosol_optical, naerosoltypes_used
 
 
 !---------------------------------------------------------------------
@@ -329,12 +309,9 @@ subroutine esfsw_driver_init
 !---------------------------------------------------------------------
 !  local variables:
 
-      integer, dimension(:), allocatable  :: endwvnbands
-      real,    dimension(:), allocatable  :: solflxbandref
-      real,    dimension(:), allocatable  :: solarfluxtoa
-
-      real,    dimension(:), allocatable  :: freqnu
-      real,    dimension(:), allocatable  :: ptstr 
+      real,    dimension(Solar_spect%nbands)    :: freqnu
+      real,    dimension(Solar_spect%nstreams)  :: ptstr 
+      integer, dimension(0:Solar_spect%nbands) :: endwvnbands
 
       integer, dimension(:), allocatable  :: nwvnsolar
       real   , dimension(:), allocatable  :: solint   
@@ -418,9 +395,8 @@ subroutine esfsw_driver_init
 !---------------------------------------------------------------------
       call fms_init
       call constants_init
-      call esfsw_utilities_init
-      call esfsw_parameters_init (nbands, nfrqpts, &
-                                  nh2obands, nstreams, tot_wvnums)
+      call rad_utilities_init
+      call esfsw_parameters_init
 
 !-----------------------------------------------------------------------
 !    read namelist.
@@ -449,21 +425,18 @@ subroutine esfsw_driver_init
 
 !---------------------------------------------------------------------
 !    define flag indicating if ICA calculations being done.
-!    THIS NEEDS TO BE DEFINED ELSEWHERE
 !---------------------------------------------------------------------
-!DEL  Cldrad_control%do_ica_calcs = do_ica_calcs
-!DEL  Cldrad_control%do_ica_calcs_iz = .true.
-
-      allocate ( freqnu(nbands), &
-                 ptstr (nstreams) )
-
-      allocate ( endwvnbands  (0:nbands) )
-      allocate ( solflxbandref  (nbands) )
-      allocate ( solarfluxtoa   (tot_wvnums) )
+      Cldrad_control%do_ica_calcs = do_ica_calcs
+      Cldrad_control%do_ica_calcs_iz = .true.
 
 !---------------------------------------------------------------------
 !    allocate module variables
 !---------------------------------------------------------------------
+      nbands = Solar_spect%nbands       
+      tot_wvnums = Solar_spect%tot_wvnums
+      nfrqpts = Solar_spect%nfrqpts
+      nstreams = Solar_spect%nstreams
+      nh2obands = Solar_spect%nh2obands
       allocate ( betaddensitymol (nbands) )
       allocate ( c1co2   (nh2obands),  &
                  c1co2str(nh2obands),  &
@@ -501,10 +474,11 @@ subroutine esfsw_driver_init
                  p0h2o   (nh2obands)    )
       allocate ( nfreqpts        (nbands) )
       allocate ( solflxband      (nbands) )
+      allocate ( solflxbandref   (nbands) )
       allocate ( kh2o            (nfrqpts),   & 
-                 ko3             (nfrqpts),   &
           	 kctms            (nfrqpts),  & 
 		 kctmf            (nfrqpts),  & 
+                 ko3             (nfrqpts),   &
                  wtfreq          (nfrqpts),   &
                  strterm         (nfrqpts)   )
       allocate ( wtstr           (nstreams),   & 
@@ -517,12 +491,6 @@ subroutine esfsw_driver_init
                  totch4strmax (nh2obands),   &
                  totn2omax    (nh2obands),   &
                  totn2ostrmax (nh2obands)    )
-      allocate ( nfreqptsco2 (nh2obands) )
-      allocate ( wtfreqco2   (nfrqpts,nh2obands) )
-      allocate ( kco2        (nfrqpts,nh2obands) )
-      allocate ( strtermco2  (nfrqpts,nh2obands) )
-      allocate ( powpco2     (nh2obands) )
-      allocate ( p0co2       (nh2obands) )
 
       betaddensitymol = 0.0 ; c1co2    = 0.0 ; c1co2str = 0.0
       c1o2     = 0.0 ; c1o2str  = 0.0 ; c2co2    = 0.0
@@ -544,9 +512,6 @@ subroutine esfsw_driver_init
       c2n2ostr = 0.0 ; c3n2o    = 0.0 ; c3n2ostr = 0.0
       c4n2o    = 0.0 ; c4n2ostr = 0.0
       totn2omax     = 0.0 ; totn2ostrmax  = 0.0
-      endwvnbands(0) = 0
-      nfreqptsco2 = 0.0 ; wtfreqco2 = 0.0 ; kco2 = 0.0 ; strtermco2 = .FALSE.
-      p0co2 = 0.0 ; powpco2 = 0.0
 
 !---------------------------------------------------------------------
 !    allocate local variables.
@@ -565,18 +530,35 @@ subroutine esfsw_driver_init
 !    read input file for band positions, solar fluxes and band
 !    strengths.
 !---------------------------------------------------------------------
-      if (nbands == 18 .and. nfrqpts == 38) then
    if (do_sw_continuum) then
+      if (nbands == 25 .and. nfrqpts == 72) then 
+        file_name = 'INPUT/esf_sw_input_data_n72b25ctm'
+      else if (nbands == 18 .and. nfrqpts == 38) then
         file_name = 'INPUT/esf_sw_input_data_n38b18ctm'
+     else if (nbands == 18 .and. nfrqpts == 74) then
+        file_name = 'INPUT/esf_sw_input_data_n74b18ctm'
       else
-          file_name = 'INPUT/esf_sw_input_data_n38b18'
+        call error_mesg ( 'esfsw_driver_mod', &
+        &  'shortwave continuum is turned on, but no input file', &
+                                                               FATAL)
       endif
-   else    
-         file_name = 'INPUT/esf_sw_input_data'
-      endif      
       
-      call error_mesg ( 'esfsw_driver_mod', &
-          'reading solar band data from file '//trim(file_name), NOTE)
+   else    
+     if (nbands == 25 .and. nfrqpts == 72) then 
+        file_name = 'INPUT/esf_sw_input_data_n72b25'
+      else if (nbands == 18 .and. nfrqpts == 38) then
+        file_name = 'INPUT/esf_sw_input_data_n38b18'
+     else if (nbands == 18 .and. nfrqpts == 74) then
+        file_name = 'INPUT/esf_sw_input_data_n74b18'
+      else
+        call error_mesg ( 'esfsw_driver_mod', &
+          'input file for desired bands and frqs is not available', &
+                                                               FATAL)
+      endif      
+    endif   
+      
+      
+      
       
       iounit = open_namelist_file (file_name)
       read(iounit,101) ( solflxbandref(nband), nband=1,NBANDS )
@@ -585,21 +567,12 @@ subroutine esfsw_driver_init
       read(iounit,103) FIRSTRAYBAND,NIRBANDS
       read(iounit,104) ( powph2o(nband), nband=1,NH2OBANDS )
       read(iounit,104) ( p0h2o(nband), nband=1,NH2OBANDS )
-
-      if (nbands == 18 .and. nfrqpts == 38) then
       read(iounit,105) ( c1co2(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c1co2str(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c2co2(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c2co2str(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c3co2(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c3co2str(nband), nband=1,NH2OBANDS )
-      else
-        read(iounit,102) NCO2BANDS
-        read(iounit,102) ( nfreqptsco2(nband), nband=1,NCO2BANDS )
-        read(iounit,104) ( powpco2(nband), nband=1,NCO2BANDS )
-        read(iounit,104) ( p0co2(nband), nband=1,NCO2BANDS )
-      endif
-
       read(iounit,105) ( c1o2(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c1o2str(nband), nband=1,NH2OBANDS ),  &
                          c1o2strschrun
@@ -622,46 +595,19 @@ subroutine esfsw_driver_init
       read(iounit,105) ( c3n2o(nband), nband=1,NH2OBANDS )
       read(iounit,105) ( c3n2ostr(nband), nband=1,NH2OBANDS )
       
-      if (nbands == 18 .and. nfrqpts == 38) then  
-      else 
-        do nband = 1,NCO2BANDS
-        do nf = 1,nfreqptsco2(nband)
-          read(iounit,206) wtfreqco2(nf,nband),kco2(nf,nband),strtermco2(nf,nband)
-        end do
-        end do
-   206  format(1p,2e16.6,16x,l16)
-      endif 
-
-      if (nbands == 18 .and. nfrqpts == 38) then
-        if (do_sw_continuum) then   
+      If (do_sw_continuum) then   
        do nf = 1,nfrqpts
        read(iounit,1066) wtfreq(nf),kh2o(nf),ko3(nf),kctms(nf),kctmf(nf),strterm(nf)    
        end do
        else 
        do nf = 1,nfrqpts
-            read(iounit,106) wtfreq(nf),kh2o(nf),ko3(nf),strterm (nf)
-          end do
-        endif
-      else
-        do nf = 1,nfrqpts
-          read(iounit,1066) wtfreq(nf),kh2o(nf),ko3(nf),kctms(nf),kctmf(nf),strterm(nf)    
+       read(iounit,106) wtfreq(nf),kh2o(nf),ko3(nf),strterm(nf)
        end do 
-      endif
-
+      end if  
       read(iounit,107) nintsolar
 
       allocate ( nwvnsolar (nintsolar) )
       allocate ( solint    (nintsolar) )
- 
-      if (do_o3_sw_effects) then
-      else 
-        ko3(:) = 0 
-      endif 
-
-      if (do_h2o_sw_effects) then
-      else
-        kh2o(:) = 0
-      endif
  
       do ni = 1,nintsolar
         read(iounit,107) nwvnsolar (ni),solint(ni)
@@ -669,10 +615,8 @@ subroutine esfsw_driver_init
  
       call close_file (iounit)
  
-      if (tot_wvnums /= endwvnbands(nbands)) then
-        call error_mesg ('esfsw_driver_mod', &
-         ' tot_wvnums = '//string(tot_wvnums)//&
-         '; endwvnbands(nbands) = '//string(endwvnbands(nbands)),NOTE)
+      if (Solar_spect%tot_wvnums /=       &
+                                 endwvnbands(Solar_spect%nbands)) then
         call error_mesg ( 'esfsw_driver_mod', &
          ' inconsistency between highest solar spectrum wavenumber '//&
           'in esfsw_parameters_mod and in esfsw_sriver input file', &
@@ -680,6 +624,97 @@ subroutine esfsw_driver_init
       endif
 
 !---------------------------------------------------------------------
+!    define the band index corresponding to near ultraviolet light
+!    (0.34 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > wvnum_340) then
+          Solar_spect%w340_band_indx = ni
+          Solar_spect%w340_band_iz = .true.
+          exit
+        endif
+      end do
+!---------------------------------------------------------------------
+!    define the band index corresponding to near ultraviolet light
+!    (0.38 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > wvnum_380) then
+          Solar_spect%w380_band_indx = ni
+          Solar_spect%w380_band_iz = .true.
+          exit
+        endif
+      end do
+!---------------------------------------------------------------------
+!    define the band index corresponding to blue light
+!    (0.44 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > wvnum_440) then
+          Solar_spect%w440_band_indx = ni
+          Solar_spect%w440_band_iz = .true.
+          exit
+        endif
+      end do
+!---------------------------------------------------------------------
+!    define the band index corresponding to red light
+!    (0.67 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > wvnum_670) then
+          Solar_spect%w670_band_indx = ni
+          Solar_spect%w670_band_iz = .true.
+          exit
+        endif
+      end do
+!---------------------------------------------------------------------
+!    define the band index corresponding to visible light
+!    (0.55 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) >wvnum_340) then
+          Solar_spect%visible_band_indx = ni
+          Solar_spect%visible_band_indx_iz = .true.
+          exit
+        endif
+      end do
+
+!---------------------------------------------------------------------
+!    define the band index corresponding to 870nm
+!    (0.87 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > wvnum_870) then
+          Solar_spect%eight70_band_indx = ni
+          Solar_spect%eight70_band_indx_iz = .true.
+          exit
+        endif
+      end do
+
+!---------------------------------------------------------------------
+!    define the band index corresponding to near infra red band
+!    (1.00 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > one_micron_wvnum) then
+          Solar_spect%one_micron_indx = ni
+          Solar_spect%one_micron_indx_iz = .true.
+          exit
+        endif
+      end do
+ 
+!---------------------------------------------------------------------
+!    define the band index corresponding to               
+!    (1.61 microns). note that endwvnbands is in units of (cm**-1).
+!---------------------------------------------------------------------
+      do ni=1,nbands
+        if (endwvnbands(ni) > onepsix_micron_wvnum) then
+          onepsix_band_indx = ni
+          exit
+        endif
+      end do
+
+!--------------------------------------------------------------------
 !    define the wavenumber one solar fluxes.                       
 !----------------------------------------------------------------- --
       do ni = 1,nintsolar
@@ -690,27 +725,26 @@ subroutine esfsw_driver_init
         end if
         nw2 = nw1 + nwvnsolar(ni) - 1
         do nw = nw1,nw2
-          solarfluxtoa(nw) = solint(ni)
+          Solar_spect%solarfluxtoa(nw) = solint(ni)
         end do
       end do
 
 !---------------------------------------------------------------------
-
-      call esfsw_bands_init ( endwvnbands, solflxbandref, solarfluxtoa)
-
-!---------------------------------------------------------------------
-! define the band index corresponding to visible light (0.55 microns)
-! and the band index corresponding to 1.61 microns.
-!---------------------------------------------------------------------
-
-      call esfsw_bands ( w550_band_indx=visible_band_indx, &
-                         onepsix_micron_indx=onepsix_band_indx )
-
+!
 !---------------------------------------------------------------------
       deallocate  (solint    )
       deallocate  (nwvnsolar )
  
 !---------------------------------------------------------------------
+!
+!---------------------------------------------------------------------
+      if ( .not. Rad_control%using_solar_timeseries_data) then
+        Solar_spect%solflxband = solflxbandref
+      endif
+      Solar_spect%solflxbandref = solflxbandref
+      Solar_spect%endwvnbands = endwvnbands
+
+!--------------------------------------------------------------------
 !    override the input file value of firstrayband if the nml control
 !    variables indicates rayleigh effects are to be considered in
 !    all bands.
@@ -724,19 +758,11 @@ subroutine esfsw_driver_init
       kh2o = kh2o *1.0E-01   ! cgs to mks
       ko3  = ko3 *1.0E-01    ! cgs to mks
 
-      if (nbands == 18 .and. nfrqpts == 38) then
-      else
-         p0co2(1:NCO2BANDS) = 1.0E-2/p0co2(1:NCO2BANDS)
-      endif
-
 !----------------------------------------------------------------------
 !
 !----------------------------------------------------------------------
       do n=1,NH2OBANDS
-
-        if (nbands == 18 .and. nfrqpts == 38) then  
-          if (do_co2_sw_effects      .and.  &
-              c1co2(n) /= input_flag .and.  &
+        if (c1co2(n) /= input_flag .and.  &
             c2co2(n) /= input_flag .and.  &
             c3co2(n) /= input_flag ) then
           c4co2(n) = c1co2(n) * c2co2(n) ** c3co2(n)
@@ -762,27 +788,15 @@ subroutine esfsw_driver_init
           totco2max(n) = 0.0                                            
           totco2strmax(n) = 0.0
         endif
-       
-        endif
-
-        if (do_o2_sw_effects .and. &
-            c1o2(n) /= input_flag .and.   &
+        if (c1o2(n) /= input_flag .and.   &
             c2o2(n) /= input_flag .and.   &
             c3o2(n) /= input_flag ) then
           c4o2(n) = c1o2(n) * c2o2(n) ** c3o2(n)
+          c4o2str(n) = c1o2str(n) * c2o2str(n) ** c3o2str(n)
           toto2max(n) = ( (1.0/c1o2(n) ) + c2o2(n) ** c3o2(n) ) ** &
                           (1.0/c3o2(n) ) - c2o2(n)
-        else
-         c4o2(n) = 0.0                              
-         toto2max(n) = 0.0                                            
-       endif
-	
-        if (do_o2_sw_effects .and. &
-            c1o2str(n) /= input_flag .and.   &
-            c2o2str(n) /= input_flag .and.   &
-            c3o2str(n) /= input_flag ) then
-          c4o2str(n) = c1o2str(n) * c2o2str(n) ** c3o2str(n)
-                            if (c3o2str(n) > 3.3E-3) then
+          if (nbands == 18) then
+            if ( n /= 4) then
               toto2strmax(n) = ( (1.0/c1o2str(n) ) + c2o2str(n) ** &
                                 c3o2str(n) ) ** (1.0/c3o2str(n) ) - &
                                 c2o2str(n)
@@ -790,12 +804,16 @@ subroutine esfsw_driver_init
               toto2strmax(n) = HUGE (c4o2strschrun) 
             endif
           else
+              toto2strmax(n) = ( (1.0/c1o2str(n) ) + c2o2str(n) ** &
+                                c3o2str(n) ) ** (1.0/c3o2str(n) ) - &
+                                c2o2str(n)
+          endif
+        else
+          c4o2(n) = 0.0                              
           c4o2str(n) = 0.0
+          toto2max(n) = 0.0                                            
           toto2strmax(n) = 0.0
         endif
-	
-	
-	
     if (do_ch4_sw_effects) then
         if (c1ch4(n) /= input_flag .and.  &
             c2ch4(n) /= input_flag .and.  &
@@ -814,7 +832,6 @@ subroutine esfsw_driver_init
           totch4strmax(n) = 0.     
         endif
      endif
-
      if (do_n2o_sw_effects) then
         if (c1n2o(n) /= input_flag .and.  &
             c2n2o(n) /= input_flag .and.  &
@@ -833,7 +850,6 @@ subroutine esfsw_driver_init
           totn2ostrmax(n) = 0.     
         endif
      endif
-
       end do
 
       c4o2strschrun = c1o2strschrun * c2o2strschrun ** c3o2strschrun
@@ -841,9 +857,62 @@ subroutine esfsw_driver_init
                              c3o2strschrun) ** (1.0/c3o2strschrun) - &
                              c2o2strschrun
 
+!     if (mpp_pe() == 0) then
+!       print *, 'c1ch4    ', c1ch4    
+!       print *, 'c2ch4    ', c2ch4    
+!       print *, 'c3ch4    ', c3ch4    
+!       print *, 'c4ch4    ', c4ch4    
+!       print *, 'totch4max', totch4max
+!       print *, 'c1ch4str ', c1ch4str    
+!       print *, 'c2ch4str ', c2ch4str    
+!       print *, 'c3ch4str ', c3ch4str    
+!       print *, 'c4ch4str ', c4ch4str    
+!       print *, 'totch4strmax', totch4strmax
+!       print *, 'c1co2    ', c1co2    
+!       print *, 'c2ch4    ', c2co2    
+!       print *, 'c3ch4    ', c3co2    
+!       print *, 'c4ch4    ', c4co2    
+!       print *, 'totch4max', totco2max
+!       print *, 'c1ch4str ', c1co2str    
+!       print *, 'c2ch4str ', c2co2str    
+!       print *, 'c3ch4str ', c3co2str    
+!       print *, 'c4ch4str ', c4co2str    
+!       print *, 'totch4strmax', totco2strmax
+!       print *, 'c1n2o    ', c1n2o    
+!       print *, 'c2ch4    ', c2n2o    
+!       print *, 'c3ch4    ', c3n2o    
+!       print *, 'c4ch4    ', c4n2o    
+!       print *, 'totch4max', totn2omax
+!       print *, 'c1ch4str ', c1n2ostr    
+!       print *, 'c2ch4str ', c2n2ostr    
+!       print *, 'c3ch4str ', c3n2ostr    
+!       print *, 'c4ch4str ', c4n2ostr    
+!       print *, 'totch4strmax', totn2ostrmax
+!       print *, '1/c1', 1.0/c1co2str
+!       print *, '1/c3', 1.0/c3co2str
+!       print *, 'c2**c3', c2co2str**c3co2str
+!       print *, '(1 / + c2**c3)**1/c3',  &
+!                 (1.0/c1co2str + c2co2str**c3co2str)**(1./c3co2str)
+!       print *, 'c4o2    ', c4o2    
+!       print *, 'c4o2str    ', c4o2str    
+!       print *, 'toto2max', toto2max
+!       print *, 'toto2strmax', toto2strmax
+!     endif
+
+!----------------------------------------------------------------------
+!
+!----------------------------------------------------------------------
+      if ( .not. Rad_control%using_solar_timeseries_data) then
+      solflxtotal = 0.0
+      do nband = 1,NBANDS
+        solflxtotal = solflxtotal + Solar_spect%solflxbandref(nband)
+      end do
+      endif
+ 
 !----------------------------------------------------------------------
 !    define the wavenumbers to evaluate rayleigh optical depth.      
 !-------------------------------------------------------------------
+      endwvnbands(0) = 0
       do nband = 1,NBANDS
         freqnu(nband) = 0.5 * ( endwvnbands(nband-1) +   &
                                 endwvnbands(nband) )
@@ -870,6 +939,8 @@ subroutine esfsw_driver_init
       twopiesq = 2.0E+00 *  PI ** 2
       densmolrefsqt3 = 3.0E+00 * densmolref ** 2
  
+!---------------------------------------------------------------------
+!
 !---------------------------------------------------------------------
       do nband = 1,NBANDS
         wavelength = 1.0E+04 / freqnu(nband)
@@ -908,7 +979,10 @@ subroutine esfsw_driver_init
  
 !---------------------------------------------------------------------
 
+
 end subroutine esfsw_driver_init 
+
+
 
 !#################################################################
 ! <SUBROUTINE NAME="swresf">
@@ -928,39 +1002,32 @@ end subroutine esfsw_driver_init
 !    the allocated memory at the end of the subroutine.
 !  </DESCRIPTION>
 !  <TEMPLATE>
-!   call swresf(press, pflux, temp, rh2o, deltaz,
-!               albedo_vis_dir, albedo_nir_dir,
-!               albedo_vis_dif, albedo_nir_dif,
-!               qo3, rrvco2, rrvch4, rrvn2o,
-!               rrsun, cosz, fracday,
-!               camtsw, cldsct, cldext, cldasymm, Sw_output)
+!   call swresf(is, ie, js, je, Atmos_input, Surface, Rad_gases, Aerosol, 
+!               Astro, &
+!               Cldrad_props, Cld_spec, Sw_output)
 !  </TEMPLATE>
-!  <IN NAME="press" TYPE="real">
-!    layer pressures (mks units) (does not include sfc)
+!  <IN NAME="is" TYPE="integer">
+!    starting subdomain i indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="pflux" TYPE="real">
-!    interface pressures (mks units)
+!  <IN NAME="ie" TYPE="integer">
+!    ending subdomain i indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="temp" TYPE="real">
-!    layer temperatures (K) (does not include sfc)
+!  <IN NAME="js" TYPE="integer">
+!    starting subdomain j indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="rh2o" TYPE="real">
-!    h2o mixing ratio
+!  <IN NAME="je" TYPE="integer">
+!    ending subdomain j indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="deltaz" TYPE="real">
-!    layer thickness in meters
+!  <IN NAME="Atmos_input" TYPE="atmos_input_type">
+!    Atmos_input_type variable containing the atmospheric
+!    input fields on the radiation grid 
 !  </IN>
-!  <IN NAME="albedo_vis_dir" TYPE="real">
-!    UV/visible surface albedo for direct radiation
-!  </IN>
-!  <IN NAME="albedo_nir_dir" TYPE="real">
-!    Near-IR surface albedo for direct radiation
-!  </IN>
-!  <IN NAME="albedo_vis_dif" TYPE="real">
-!    UV/visible surface albedo for diffuse radiation
-!  </IN>
-!  <IN NAME="albedo_nir_dif" TYPE="real">
-!    Near-IR surface albedo for diffuse radiation
+!  <IN NAME="Aerosol" TYPE="aerosol_type">
+!   Aerosol input data for shortwave radiation calculation
 !  </IN>
 !  <IN NAME="Astro" TYPE="astronomy_type">
 !    Astronomy_type variable containing the astronomical
@@ -970,33 +1037,26 @@ end subroutine esfsw_driver_init
 !    Radiative_gases_type variable containing the radiative 
 !    gas input fields on the radiation grid 
 !  </IN>
+!  <IN NAME="Cldrad_props" TYPE="cldrad_properties_type">
+!    The cloud radiative property input fields on the
+!    radiation grid
+!  </IN>
 !  <INOUT NAME="Sw_output" TYPE="sw_output_type">
 !    The shortwave radiation calculation result
 !  </INOUT>
-!  <IN NAME="camtsw" TYPE="real">
-!   Cloud amount for shortwave clouds. If stochastic clouds is implemented
-!   then cloud amount by shortwave band.
+!  <IN NAME="Surface" TYPE="surface_type">
+!   Surface data as boundary condition to radiation
 !  </IN>
-!  <IN NAME="cldext" TYPE="real">
-!   Cloud extinction parameter
-!  </IN>
-!  <IN NAME="cldsct" TYPE="real">
-!   Cloud single scattering albedo
-!  </IN>
-!  <IN NAME="cldasymm" TYPE="real">
-!   Cloud asymmetric parameter
+!  <IN NAME="Cld_spec" TYPE="cld_specification_type">
+!   Cloud specification data as initial condition to radiation
 !  </IN>
 ! </SUBROUTINE>
 
-subroutine swresf (press, pflux, temp, rh2o, deltaz, &
-                   albedo_vis_dir, albedo_nir_dir, &
-                   albedo_vis_dif, albedo_nir_dif, &
-                   qo3, rrvco2, rrvch4, rrvn2o, &
-                   solflxband, solar_constant, rrsun, cosz, fracday, &
-                   camtsw, cldsct, cldext, cldasymm, &
-                   aeroasymfac, aerosctopdep, aeroextopdep, &
-                   do_totcld_forcing, flag_stoch, Sw_output, &
-                   local_solar_forcing) ! 052416[ZS]: add local_solar_forcing
+subroutine swresf (is, ie, js, je, Atmos_input, Surface, Rad_gases,  &
+                   Aerosol, Aerosol_props, Astro, Cldrad_props,  &
+                   Cld_spec, including_volcanoes, Sw_output,   &
+                   Aerosol_diags, including_aerosols,   &
+                   naerosol_optical) 
 
 !----------------------------------------------------------------------
 !    swresf uses the delta-eddington technique in conjunction with a    
@@ -1005,48 +1065,45 @@ subroutine swresf (press, pflux, temp, rh2o, deltaz, &
 !    notes: drops are assumed if temp>273.15K, ice crystals otherwise.
 !-------------------------------------------------------------------
 
-real, dimension(:,:,:),        intent(in)    :: press, pflux, temp, rh2o, deltaz
-real, dimension(:,:),          intent(in)    :: albedo_vis_dir, &
-                                                albedo_nir_dir, &
-                                                albedo_vis_dif, &
-                                                albedo_nir_dif
-real, dimension(:,:,:),        intent(in)    :: qo3
-real,                          intent(in)    :: rrvco2, rrvch4, rrvn2o, rrsun
-real, dimension(:,:,:),        intent(in)    :: cosz, fracday
-real, dimension(:,:,:,:),      intent(in)    :: camtsw      
-real, dimension(:,:,:,:,:),    intent(in)    :: cldsct, cldext, cldasymm
-real,dimension(:,:,:,:),       intent(in)    :: aeroasymfac, aerosctopdep, aeroextopdep
-real,                          intent(in)    :: solar_constant
-real, dimension(nbands),       intent(in)    :: solflxband
-logical,                       intent(in)    :: do_totcld_forcing
-integer,                       intent(in)    :: flag_stoch
+integer,                       intent(in)    :: is, ie, js, je
+type(atmos_input_type),        intent(in)    :: Atmos_input
+type(surface_type),            intent(in)    :: Surface
+type(radiative_gases_type),    intent(in)    :: Rad_gases   
+type(aerosol_type),            intent(in)    :: Aerosol     
+type(aerosol_properties_type), intent(in)    :: Aerosol_props
+type(astronomy_type),          intent(in)    :: Astro
+type(cldrad_properties_type),  intent(in)    :: Cldrad_props
+type(cld_specification_type),  intent(in)    :: Cld_spec      
+logical,                       intent(in)    :: including_volcanoes
 type(sw_output_type),          intent(inout) :: Sw_output   
-real, dimension(:,:),          intent(in)    :: local_solar_forcing
+type(aerosol_diagnostics_type),intent(inout) :: Aerosol_diags
+logical,                       intent(in)    :: including_aerosols  
+integer,                       intent(in)    :: naerosol_optical
 
 
 !-------------------------------------------------------------------
 !  intent(in) variables:
 !
-!      press          layer pressures (mks units) (does not include sfc)
-!      pflux          interface pressures (mks units)
-!      temp           layer temperatures (K) (does not include sfc)
-!      rh2o           h2o mixing ratio
-!      deltaz         layer thickness in meters
-!      albedo_vis_dir UV/visible surface albedo for direct radiation
-!      albedo_nir_dir Near-IR surface albedo for direct radiation
-!      albedo_vis_dif UV/visible surface albedo for diffuse radiation
-!      albedo_nir_dif Near-IR surface albedo for diffuse radiation
+!    is,ie,js,je    starting/ending subdomain i,j indices of data in 
+!                   the physics_window being integrated
+!      Atmos_input    atmos_input_type structure, contains variables
+!                     defining atmospheric state
+!      Surface        surface_type structure, contains variables 
+!                     defining the surface characteristics
 !      Rad_gases      radiative_gases_type structure, contains var-
 !                     iables defining the radiatively active gases, 
 !                     passed through to lower level routines
+!      Aerosol        aerosol_type structure, contains variables
+!                     defining aerosol fields, passed through to
+!                     lower level routines
+!      Aerosol_props  aerosol radiative property input data for the 
+!                     radiation package
 !      Astro          astronomy_type structure
-!      camtsw         cloud amount for shortwave clouds,
-!                     if stochastic clouds is implemented then
-!                     cloud amount by shortwave band
-!      cldsct, cldext, cldasymm
-!                     cloud radiative properties
-!      aeroasymfac, aerosctopdep, aeroextopdep
-!                     aerosol radiative properties
+!      Cldrad_props   cloud radiative property input data for the 
+!                     radiation package
+!      Cld_spec       cld_specification_type structure, contains var-
+!                     iables defining the cloud distribution, passed 
+!                     through to lower level routines
 !                                                                 
 !   intent(inout) variables:
 !
@@ -1058,29 +1115,34 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !     local variables:
  
 
-      logical, dimension (size(temp,1), &
-                          size(temp,2), &
-                          size(temp,3))  ::  cloud
+      logical, dimension (size(Atmos_input%temp,1), &
+                          size(Atmos_input%temp,2), &
+                          size(Atmos_input%temp,3)-1)  :: &
+                             cloud
 
-      logical, dimension (size(temp,1), &
-                          size(temp,2))  ::   &
+      logical, dimension (size(Atmos_input%temp,1), &
+                          size(Atmos_input%temp,2))  ::   &
                               cloud_in_column,   daylight
 
-      real, dimension (size(temp,1), &
-                       size(temp,2), &
-                       size(temp,3), &
-                        nbands)  ::  rayopdep
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3)-1, &
+                        Solar_spect%nbands)  :: &
+            aeroasymfac,     aerosctopdep,   aeroextopdep, &
+            rayopdep
 
-      real, dimension (size(temp,1), &
-                       size(temp,2), &
-                       size(temp,3), &
-                       nfrqpts,NSOLWG)  ::  gasopdep
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3)-1, &
+                       nfrqpts,NSOLWG)  ::     &
+                                                    gasopdep
 
-      real, dimension (size(temp,1), &
-                       size(temp,2), &
-                       size(temp,3))  :: &
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3)-1)  :: &
             cloudfrac,      cldfrac_band,    cldfrac,         &
-                    cloud_deltaz,                     &
+            deltaz,         cloud_deltaz,                     &
+            cldext,         cldsct,          cldasymm,         &
             cloudasymfac,   cloudextopdep,                     &
             cloudsctopdep,                   deltap,           &
             densitymol,     extopdepclr,                       &
@@ -1099,46 +1161,46 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
             tlayerdir,      tlayerdirclr,     &
             tlayerdirovc
            
-      real, dimension (size(pflux,1), &
-                       size(pflux,2), &
-                       size(pflux,3))  :: &
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3))  :: &
               reflectance,  transmittance,  tr_dir            
 
-      real, dimension (size(pflux,1), &
-                       size(pflux,2), &
-                       size(pflux,3), &
-                       size(cosz,3)) :: &
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3), &
+                       Rad_control%nzens)  :: &
             dfswbandclr,     fswbandclr,    ufswbandclr, &
             dfswband,        fswband,       ufswband,  &
             sumtrclr,        sumreclr,      sumtr_dir_clr,  & 
             sumtr,           sumre,         sumtr_dir
 
-      real, dimension (size(temp,1), &
-                       size(temp,2), &
-                       size(cosz,3)) :: sumtr_dir_up
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       Rad_control%nzens)  :: sumtr_dir_up
 
-      real, dimension (size(pflux,1), &
-                       size(pflux,2), &
-                       size(pflux,3))  :: &
-            pflux_cgs,            pflux_mks, &
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3))  :: &
+            press,           pflux,            pflux_mks, &
+            temp,                                       &
             reflectanceclr,  transmittanceclr, tr_dirclr
 
-      real, dimension (size(temp,1), &
-                       size(temp,2), &
-                       size(temp,3), &
-                       size(cosz,3)) :: hswbandclr, hswband
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2), &
+                       size(Atmos_input%temp,3)-1 , &
+                       Rad_control%nzens)  :: &
+                hswbandclr,  hswband
 
-      real, dimension (size(temp,1), &
-                       size(temp,2))    ::  &
+      real, dimension (size(Atmos_input%temp,1), &
+                       size(Atmos_input%temp,2))    ::  &
             sfcalb_dir,   sfcalb_dif,  wtfac_p,    &
             fracday_p,    solarflux_p
 
-      real, dimension (size(press,1),    &
-                       size(press,2), NSOLWG) :: cosangsolar_p
-
-      real, dimension (size(press,1), &
-                       size(press,2), &
-                       size(press,3)) :: press_mks
+      real, dimension (size(Atmos_input%press,1),    &
+                       size(Atmos_input%press,2),   &
+                                         NSOLWG) ::         &
+                 cosangsolar_p
 
       integer :: j, i, k, ng, np, nband, nf, ns, nz
       integer :: nzens
@@ -1150,7 +1212,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
       real    :: ssolar  
       real    :: solflxtotal_local
 
-      logical :: do_stochastic_clouds, do_ica_calcs
+
 
 
 !-----------------------------------------------------------------------
@@ -1173,46 +1235,39 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
       endif
 
 !---------------------------------------------------------------------
-!    set flags for stochastic clouds
-!---------------------------------------------------------------------
-     do_stochastic_clouds = flag_stoch .gt. 0
-     do_ica_calcs         = flag_stoch .gt. 1
-     if (do_stochastic_clouds) then
-        if (size(camtsw,4) .ne. nbands) &
-            call error_mesg ('esfsw_driver_mod',   &
-               'incorrect size for cloud prop arrays when '//&
-               'stochastic clouds activated', FATAL )
-     endif
-     if (do_ica_calcs) then
-        if (size(cldsct,5) .ne. nbands) &
-            call error_mesg ('esfsw_driver_mod',   &
-               'incorrect size for cloud prop arrays when '//&
-               'ica calcs activated', FATAL )
-     endif
-
-!---------------------------------------------------------------------
 !    define the solar_constant appropriate at Rad_time when solar
 !    input is varying with time.
 !---------------------------------------------------------------------
+!-- The following fix is for openmp
+      if (Rad_control%using_solar_timeseries_data) then
         solflxtotal_local = 0.0
         do nband = 1,NBANDS
-        solflxtotal_local = solflxtotal_local + solflxband(nband)
+          solflxtotal_local = solflxtotal_local + Solar_spect%solflxband(nband)
         end do
+      else
+        solflxtotal_local = solflxtotal
+      endif
+
+!---------------------------------------------------------------------
+!
+      
+      cldfrac = Cld_spec%camtsw
 
 !---------------------------------------------------------------------
 !  convert to cgs and then back to mks for consistency with previous 
 !---------------------------------------------------------------------
-      press_mks(:,:,:) = 0.1*(10.0*press(:,:,:))
-      pflux_cgs(:,:,:) =     (10.0*pflux(:,:,:))
-      cloud_deltaz = deltaz  ! temporary mod - BW
-                             ! until cloud props are updated
+      press(:,:,:) = 0.1*(10.0*Atmos_input%press(:,:,:))
+      pflux(:,:,:) =     (10.0*Atmos_input%pflux(:,:,:))
+      deltaz(:,:,:) = Atmos_input%deltaz(:,:,:)
+      temp  (:,:,:) = Atmos_input%temp  (:,:,:)
+      cloud_deltaz = Atmos_input%clouddeltaz
 
 !--------------------------------------------------------------------
 !    define limits and dimensions 
 !--------------------------------------------------------------------
       ix = size(temp,1)
       jx = size(temp,2)
-      kx = size(temp,3)
+      kx = size(temp,3) - 1
       israd = 1
       jsrad = 1
       ksrad = 1
@@ -1227,7 +1282,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !----------------------------------------------------------------------c
       do j = JSRAD,JERAD
         do i = ISRAD,IERAD
-          if ( any(fracday(i,j,:) /= 0.0) ) then
+          if ( Astro%fracday(i,j) /= 0.0) then
             daylight(i,j) = .true.                 
           else
             daylight(i,j) = .false.                
@@ -1236,17 +1291,24 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
         end do
       end do
         
-!---------------------------------------------------------------------
+      call compute_aerosol_optical_props     &
+                (Atmos_input, Aerosol, Aerosol_props, &
+                 including_volcanoes, Aerosol_diags,  &
+                 including_aerosols, naerosol_optical, &
+                 daylight, aeroextopdep, aerosctopdep, aeroasymfac) 
 
-      ssolar = solar_constant*rrsun
+!---------------------------------------------------------------------
+!
+!---------------------------------------------------------------------
+      ssolar = Sw_control%solar_constant*Astro%rrsun
+
  
 !----------------------------------------------------------------------
 !    define a flag indicating points with both sunlight and cloud. set
 !    the flag indicating that cloud is present in columns with such
 !    points.
 !----------------------------------------------------------------------
-      if (.not. do_stochastic_clouds) then
-        cldfrac = camtsw(:,:,:,1)
+      if (.not. Cldrad_control%do_stochastic_clouds) then
         do j = JSRAD,JERAD
           do i = ISRAD,IERAD
             if (daylight(i,j)) then
@@ -1273,23 +1335,22 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !----------------------------------------------------------------------c
 !    define pressure related quantities, pressure is in mks units. 
 !----------------------------------------------------------------------c
-      pflux_mks = pflux_cgs*1.0E-1
+      pflux_mks = pflux*1.0E-1
 
       do k = KSRAD+1,KERAD+1
         deltap(:,:,k-1) = pflux_mks(:,:,k) - pflux_mks(:,:,k-1)
         gocpdp(:,:,k-1) = radcon_mks/deltap(:,:,k-1)
       end do
  
-      call compute_gas_props (press_mks, pflux_mks, temp, rh2o, deltaz, &
-                              qo3, rrvco2, rrvch4, rrvn2o, &
-                              cosz, daylight, gasopdep)
+      call compute_gas_props (Atmos_input, Rad_gases, Astro,   &
+                              daylight, gasopdep)
   
 !---------------------------------------------------------------------
 !    define the molecular density for use in calculating the           
 !    rayleigh optical depth (deltaz is in meters).                     
 !--------------------------------------------------------------------
       do k = KSRAD,KERAD
-        densitymol(:,:,k) = refquanray * press_mks(:,:,k) / temp(:,:,k)
+        densitymol(:,:,k) = refquanray * press(:,:,k) / temp(:,:,k)
       end do
  
 
@@ -1306,22 +1367,17 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !    define the rayleigh optical depths.                                
 !---------------------------------------------------------------------
       do nband = 1, NBANDS
-        if (do_rayleigh) then
         rayopdep(:,:,:,nband) = betaddensitymol(nband)*  &
                                         densitymol(:,:,:)*deltaz(:,:,:)
-        else 
-          rayopdep(:,:,:,nband) = 1.e-6*betaddensitymol(nband)*  &
-                                          densitymol(:,:,:)*deltaz(:,:,:)
-        endif
       end do   ! (nband loop)
 
-      nzens = size(cosz,3)
+      nzens = Rad_control%nzens
 
 !--------------------------------------------------------------------
  
       do nprofile=1, nprofiles
         if (do_ica_calcs) then
-          cldfrac_band(:,:,:) = camtsw(:,:,:,nprofile)
+          cldfrac_band(:,:,:) = Cld_spec%camtsw_band(:,:,:,nprofile)
         endif
 
 !----------------------------------------------------------------------c
@@ -1331,7 +1387,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
         np = 0
  
         do nz=1,nzens
-          if (do_totcld_forcing) then
+          if (Rad_control%do_totcld_forcing) then
             dfswbandclr(:,:,:,nz) = 0.0
             fswbandclr(:,:,:,nz) = 0.0
             hswbandclr(:,:,:,nz) = 0.0
@@ -1351,14 +1407,16 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
             sumtr_dir(:,:,:,nz) = 0.0
             sumtr_dir_up(:,:,nz) = 0.0
             sumre(:,:,:,nz) = 0.0
-            if (do_totcld_forcing) then
+            if (Rad_control%do_totcld_forcing) then
               sumtrclr(:,:,:,nz) = 0.0
               sumreclr(:,:,:,nz) = 0.0
               sumtr_dir_clr(:,:,:,nz) = 0.0
             endif
           end do
-          if (do_stochastic_clouds .and. .not. do_ica_calcs) then
-            cldfrac_band(:,:,:) = camtsw(:,:,:,nband)
+          if (Cldrad_control%do_stochastic_clouds) then
+            if (.not. do_ica_calcs) then
+              cldfrac_band(:,:,:) = Cld_spec%camtsw_band(:,:,:,nband)
+            endif
           endif
  
 !----------------------------------------------------------------------
@@ -1368,7 +1426,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !    the flag indicating that cloud is present in columns with such
 !    points.
 !----------------------------------------------------------------------
-          if (do_stochastic_clouds) then
+          if (Cldrad_control%do_stochastic_clouds) then
             do j = JSRAD,JERAD
               do i = ISRAD,IERAD
                 cloud_in_column(i,j) = .false.
@@ -1395,20 +1453,21 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 
 
 !---------------------------------------------------------------------
-!    obtain cloud properties from the input arguments
+!    obtain cloud properties from the Cldrad_props input variable.
 !--------------------------------------------------------------------
+          cldext(:,:,:) = Cldrad_props%cldext(:,:,:,nband,nprofile)
+          cldsct(:,:,:) = Cldrad_props%cldsct(:,:,:,nband,nprofile)
+          cldasymm(:,:,:) = Cldrad_props%cldasymm(:,:,:,nband,nprofile)
 
           do k = KSRAD,KERAD
             do j=JSRAD,JERAD
               do i=ISRAD, IERAD
                 if (cloud(i,j,k) ) then
-                  cloudextopdep(i,j,k) = 1.0E-03*cldext(i,j,k,nband,nprofile) * &
+                  cloudextopdep(i,j,k) = 1.0E-03*cldext(i,j,k) *    &
                                          cloud_deltaz(i,j,k)
-                  cloudsctopdep(i,j,k) = 1.0E-03*cldsct(i,j,k,nband,nprofile) * &
+                  cloudsctopdep(i,j,k) = 1.0E-03*cldsct(i,j,k) *    &
                                          cloud_deltaz(i,j,k)
-!DEL              cloudextopdep(i,j,k) = cldext(i,j,k,nband,nprofile)
-!DEL              cloudsctopdep(i,j,k) = cldsct(i,j,k,nband,nprofile)
-                  cloudasymfac(i,j,k) = cldasymm(i,j,k,nband,nprofile)
+                  cloudasymfac(i,j,k) = cldasymm(i,j,k)
                 endif
               end do
             end do
@@ -1529,7 +1588,12 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !    do calculations for all desired zenith angles.
 !---------------------------------------------------------------------
               do nz = 1, nzens
-                cosangsolar_p(:,:,ng) = cosz(:,:,nz)   
+                if (Rad_control%hires_coszen) then
+                  cosangsolar_p(:,:,ng) = Astro%cosz_p(:,:,nz)   
+                else
+                  cosangsolar_p(:,:,ng) = Astro%cosz(:,:)          
+                endif
+
                 where (cosangsolar_p(:,:,:) == 0.0)   &
                                             cosangsolar_p(:,:,:) = 1.0
 
@@ -1690,11 +1754,11 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !    visible value for the remaining bands).                            
 !----------------------------------------------------------------------c
                 if (nband <= NIRBANDS ) then
-                  sfcalb_dir(:,:) = albedo_nir_dir(:,:)
-                  sfcalb_dif(:,:) = albedo_nir_dif(:,:)
+                  sfcalb_dir(:,:) = Surface%asfc_nir_dir(:,:)
+                  sfcalb_dif(:,:) = Surface%asfc_nir_dif(:,:)
                 else
-                  sfcalb_dir(:,:) = albedo_vis_dir(:,:)
-                  sfcalb_dif(:,:) = albedo_vis_dif(:,:)
+                  sfcalb_dir(:,:) = Surface%asfc_vis_dir(:,:)
+                  sfcalb_dif(:,:) = Surface%asfc_vis_dif(:,:)
                 end if
  
 !-------------------------------------------------------------------- 
@@ -1710,7 +1774,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !---------------------------------------------------------------------
 !
 !---------------------------------------------------------------------
-                if (do_totcld_forcing) then
+                if (Rad_control%do_totcld_forcing) then
                   call adding       &
                       (ix, jx,  kx, rlayerdirclr, tlayerdirclr,   &
                        rlayerdifclr, tlayerdifclr, tlayerdeclr,   &
@@ -1758,7 +1822,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !---------------------------------------------------------------------
 !
 !---------------------------------------------------------------------
-                if (do_totcld_forcing) then
+                if (Rad_control%do_totcld_forcing) then
                   do k = KSRAD,KERAD+1
                     do j=JSRAD,JERAD
                       do i=ISRAD,IERAD
@@ -1793,10 +1857,16 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !    the given total solar insolation.                                 
 !---------------------------------------------------------------------
           do nz = 1,nzens
-            ! 052416 [ZS]: add local_solar_forcing
-            solarflux_p(:,:) = fracday(:,:,nz)*solflxband(nband)*(ssolar+local_solar_forcing(:,:))/solflxtotal_local
+            if (Rad_control%hires_coszen) then
+              fracday_p(:,:) = Astro%fracday_p(:,:,nz)
+            else
+              fracday_p(:,:) = Astro%fracday(:,:)
+            endif
+            solarflux_p(:,:) = fracday_p(:,:)*  &
+                                   Solar_spect%solflxband(nband)*  &
+                                                      ssolar/solflxtotal_local
  
-            if (nband == visible_band_indx) then
+            if (nband == Solar_spect%visible_band_indx) then
               Sw_output%bdy_flx(:,:,1,nz) =   &
                   Sw_output%bdy_flx(:,:,1,nz) + sumre(:,:,1,nz)*   &
                                                         solarflux_p(:,:)
@@ -1919,7 +1989,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
 !---------------------------------------------------------------------
             if (nprofile == 1) then  ! clr sky need be done only for 
                                      ! first cloud profile
-              if (do_totcld_forcing) then
+              if (Rad_control%do_totcld_forcing) then
                 do j=JSRAD,JERAD
                   do i=ISRAD,IERAD
                     if (daylight(i,j) ) then
@@ -1940,7 +2010,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
                     end do
                   end do
                 endif
-                if (nband == visible_band_indx) then
+                if (nband == Solar_spect%visible_band_indx) then
                   Sw_output%bdy_flx_clr(:,:,1,nz) =      &
                            sumreclr(:,:,1,nz)*solarflux_p(:,:)
                   Sw_output%bdy_flx_clr(:,:,3,nz) =    &
@@ -1998,6 +2068,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
                 do k = KSRAD,KERAD
                   do j=JSRAD,JERAD
                     do i=ISRAD,IERAD
+		     
                        hswbandclr(i,j,k,nz) =    &
                                 (fswbandclr(i,j,k+1,nz) -      &
                                     fswbandclr(i,j,k,nz))*gocpdp(i,j,k)
@@ -2069,7 +2140,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
         end do
       end do
 
-      if (do_totcld_forcing) then
+      if (Rad_control%do_totcld_forcing) then
         do j=JSRAD,JERAD
           do i=ISRAD,IERAD
             if (daylight(i,j) ) then
@@ -2100,7 +2171,7 @@ real, dimension(:,:),          intent(in)    :: local_solar_forcing
                             1.0E-03*(1.0E+03*Sw_output%dfsw(:,:,:,:))
       Sw_output%ufsw(:,:,:,:) =     &
                             1.0E-03*(1.0E+03*Sw_output%ufsw(:,:,:,:))
-      if (do_totcld_forcing) then
+      if (Rad_control%do_totcld_forcing) then
         Sw_output%fswcf(:,:,:,:) =   &
                             1.0E-03*(1.0E+03*Sw_output%fswcf(:,:,:,:))
         Sw_output%dfswcf(:,:,:,:) =     &
@@ -2135,7 +2206,6 @@ subroutine esfsw_driver_end
 !--------------------------------------------------------------------
 !    close out the modules that this module initialized.
 !--------------------------------------------------------------------
-      call esfsw_utilities_end
       call esfsw_parameters_end
 
 !---------------------------------------------------------------------
@@ -2155,6 +2225,497 @@ end subroutine esfsw_driver_end
 !                    PRIVATE SUBROUTINES
 !
 !%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+!#################################################################
+! <SUBROUTINE NAME="compute_aerosol_optical_props">
+!  <OVERVIEW>
+!   Subroutine that uses the delta-eddington technique in conjunction
+!   with a multi-band parameterization for h2o+co2+o2+o3 absorption
+!   in the solar spectrum to derive solar fluxes and heating rates.
+!  </OVERVIEW>
+!  <DESCRIPTION>
+!    This subroutine calculates optical depth, single scattering albedo,
+!    asymmetry parameter of a layer based on gaseous absorbers,
+!    clouds, aerosols, and rayleigh scattering. It then uses delta-
+!    eddington technique to calculate radiative flux at each layer. 
+!    Doubling and adding technique is used to combine the layers
+!    and calculate flux at TOA and surface and heating rate. This
+!    subroutine allocates a substantial amount of memory and deallocates
+!    the allocated memory at the end of the subroutine.
+!  </DESCRIPTION>
+!  <TEMPLATE>
+!   call comput(is, ie, js, je, Atmos_input, Surface, Rad_gases, Aerosol, 
+!               Astro, &
+!               Cldrad_props, Cld_spec, Sw_output)
+!  </TEMPLATE>
+!  <IN NAME="is" TYPE="integer">
+!    starting subdomain i indices of data in 
+!                   the physics_window being integrated
+!  </IN>
+!  <IN NAME="ie" TYPE="integer">
+!    ending subdomain i indices of data in 
+!                   the physics_window being integrated
+!  </IN>
+!  <IN NAME="js" TYPE="integer">
+!    starting subdomain j indices of data in 
+!                   the physics_window being integrated
+!  </IN>
+!  <IN NAME="je" TYPE="integer">
+!    ending subdomain j indices of data in 
+!                   the physics_window being integrated
+!  </IN>
+!  <IN NAME="Atmos_input" TYPE="atmos_input_type">
+!    Atmos_input_type variable containing the atmospheric
+!    input fields on the radiation grid 
+!  </IN>
+!  <IN NAME="Aerosol" TYPE="aerosol_type">
+!   Aerosol input data for shortwave radiation calculation
+!  </IN>
+!  <IN NAME="Astro" TYPE="astronomy_type">
+!    Astronomy_type variable containing the astronomical
+!    input fields on the radiation grid  
+!  </IN>
+!  <IN NAME="Rad_gases" TYPE="radiative_gases_type">
+!    Radiative_gases_type variable containing the radiative 
+!    gas input fields on the radiation grid 
+!  </IN>
+!  <IN NAME="Cldrad_props" TYPE="cldrad_properties_type">
+!    The cloud radiative property input fields on the
+!    radiation grid
+!  </IN>
+!  <INOUT NAME="Sw_output" TYPE="sw_output_type">
+!    The shortwave radiation calculation result
+!  </INOUT>
+!  <IN NAME="Surface" TYPE="surface_type">
+!   Surface data as boundary condition to radiation
+!  </IN>
+!  <IN NAME="Cld_spec" TYPE="cld_specification_type">
+!   Cloud specification data as initial condition to radiation
+!  </IN>
+! </SUBROUTINE>
+
+subroutine compute_aerosol_optical_props    &
+          (Atmos_input, Aerosol, Aerosol_props, including_volcanoes,  &
+           Aerosol_diags, including_aerosols, naerosol_optical, &
+           daylight, aeroextopdep, aerosctopdep, aeroasymfac)
+
+!----------------------------------------------------------------------
+!    comput uses the delta-eddington technique in conjunction with a    
+!    multiple-band parameterization for h2o+co2+o2+o3 absorption to   
+!    derive solar fluxes and heating rates.                             
+!    notes: drops are assumed if temp>273.15K, ice crystals otherwise.
+!-------------------------------------------------------------------
+
+type(atmos_input_type),        intent(in)    :: Atmos_input
+type(aerosol_type),            intent(in)    :: Aerosol     
+type(aerosol_properties_type), intent(in)    :: Aerosol_props
+logical,                       intent(in)    :: including_volcanoes
+type(aerosol_diagnostics_type),intent(inout) :: Aerosol_diags
+logical,                       intent(in)    :: including_aerosols  
+integer,                       intent(in)    :: naerosol_optical
+logical,dimension(:,:),        intent(in)    :: daylight
+real, dimension(:,:,:,:),      intent(out)   :: aeroextopdep, &
+                                                aerosctopdep, &
+                                                aeroasymfac 
+
+
+!-------------------------------------------------------------------
+!  intent(in) variables:
+!
+!      Atmos_input    atmos_input_type structure, contains variables
+!                     defining atmospheric state
+!      Aerosol        aerosol_type structure, contains variables
+!                     defining aerosol fields, passed through to
+!                     lower level routines
+!      Aerosol_props  aerosol radiative property input data for the 
+!                     radiation package
+!                                                                 
+!   intent(inout) variables:
+!
+!      Sw_output         shortwave radiation output data
+!
+!---------------------------------------------------------------------
+
+!-----------------------------------------------------------------------
+!     local variables:
+ 
+      real, dimension (size(Atmos_input%temp,3)-1)  :: &
+                      arprod, asymm,   arprod2,      deltaz, &     
+                      sum_g_omega_tau, sum_ext,      sum_sct
+
+      integer, dimension (size (Atmos_input%press, 3)-1 ) ::   &
+                      opt_index_v3, opt_index_v4, &
+                      opt_index_v5, opt_index_v6, &
+                      opt_index_v7, opt_index_v8, &
+                      opt_index_v9, opt_index_v10, &
+                      irh
+
+      real, dimension (naerosol_optical)   ::            &
+                      aerext,          aerssalb,       aerasymm
+
+      real        :: aerext_i, aerssalb_i, aerasymm_i
+      integer     :: j, i, k, nband, nsc
+      integer     :: israd, jsrad, ierad, jerad, ksrad, kerad
+
+!-----------------------------------------------------------------------
+!     local variables:
+!
+!       aeramt
+!       sum_g_omega_tau
+!       opt_index_v3
+!       irh
+!    etc.
+!
+!--------------------------------------------------------------------
+
+
+!--------------------------------------------------------------------
+!    define limits and dimensions 
+!--------------------------------------------------------------------
+      israd = 1
+      jsrad = 1
+      ksrad = 1
+      ierad = size(Atmos_input%temp,1)
+      jerad = size(Atmos_input%temp,2)
+      kerad = size(Atmos_input%temp,3) - 1
+
+      naerosoltypes_used = size(Aerosol%aerosol,4)
+
+      do j = JSRAD,JERAD
+        do i = ISRAD,IERAD
+          if (daylight(i,j) .or. Sw_control%do_cmip_diagnostics) then
+            deltaz(:) = Atmos_input%deltaz(i,j,:)
+
+            do nband = 1,Solar_spect%nbands
+              if (including_aerosols) then                           
+                aerext(:) = Aerosol_props%aerextband(nband,:)
+                aerssalb(:) = Aerosol_props%aerssalbband(nband,:)
+                aerasymm(:) = Aerosol_props%aerasymmband(nband,:)
+
+!-------------------------------------------------------------------
+!    define the local variables for the band values of aerosol and 
+!    cloud single scattering parameters.                               
+!    note: the unit for the aerosol extinction is kilometer**(-1).     
+!--------------------------------------------------------------------
+                do k = KSRAD,KERAD
+                  irh(k) = MIN(100, MAX( 0,     &
+                      NINT(100.*Atmos_input%aerosolrelhum(i,j,k))))
+                  opt_index_v3(k) = &
+                              Aerosol_props%sulfate_index (irh(k), &
+                                            Aerosol_props%ivol(i,j,k))
+                  opt_index_v4(k) =    &
+                              Aerosol_props%omphilic_index( irh(k) )
+                  opt_index_v5(k) =    &
+                              Aerosol_props%bcphilic_index( irh(k) )
+                  opt_index_v6(k) =    &
+                              Aerosol_props%seasalt1_index( irh(k) )
+                  opt_index_v7(k) =    &
+                              Aerosol_props%seasalt2_index( irh(k) )
+                  opt_index_v8(k) =    &
+                              Aerosol_props%seasalt3_index( irh(k) )
+                  opt_index_v9(k) =    &
+                              Aerosol_props%seasalt4_index( irh(k) )
+                  opt_index_v10(k) =    &
+                              Aerosol_props%seasalt5_index( irh(k) )
+                end do
+
+!---------------------------------------------------------------------
+!    calculate scattering properties for all aerosol constituents 
+!    combined.
+!---------------------------------------------------------------------
+                do k = KSRAD,KERAD
+                  sum_g_omega_tau(k) = 0.0
+                  sum_ext(k) = 0.
+                  sum_sct(k) = 0.
+                end do
+                do nsc = 1,NAEROSOLTYPES_USED
+                  if (Aerosol_props%optical_index(nsc) > 0) then
+                    aerext_i =     &
+                            aerext(Aerosol_props%optical_index(nsc))
+                    aerssalb_i =     &
+                            aerssalb(Aerosol_props%optical_index(nsc))
+                    aerasymm_i =     &
+                            aerasymm(Aerosol_props%optical_index(nsc))
+                    do k = KSRAD,KERAD
+                      arprod(k) =    &
+                            aerext_i*(1.e3*Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb_i*arprod(k)
+                      asymm(k)   = aerasymm_i
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + aerssalb_i*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +     &
+                                      aerasymm_i*(aerssalb_i*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                                     Aerosol_props%sulfate_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v3(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v3(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v3(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) +    &
+                                    aerssalb(opt_index_v3(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                               aerasymm(opt_index_v3(k))*  &
+                                   (aerssalb(opt_index_v3(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                                     Aerosol_props%bc_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v3(k)) *    &
+                                    (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v3(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v3(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) +       &
+                                    aerssalb(opt_index_v3(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) + &
+                               aerasymm(opt_index_v3(k)) * &
+                                   (aerssalb(opt_index_v3(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                               Aerosol_props%omphilic_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v4(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v4(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v4(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v4(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +   &
+                               aerasymm(opt_index_v4(k))*     &
+                                  (aerssalb(opt_index_v4(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                                  Aerosol_props%bcphilic_flag) then
+                    if (Rad_control%using_im_bcsul) then
+                      do k = KSRAD,KERAD
+                        arprod(k) = aerext(opt_index_v3(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                        arprod2(k) = aerssalb(opt_index_v3(k))*arprod(k)
+                        asymm(k)   = aerasymm(opt_index_v3(k))
+                        sum_ext(k) = sum_ext(k) + arprod(k)
+                        sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v3(k))*arprod(k)
+                        sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                               aerasymm(opt_index_v3(k)) * &
+                                  (aerssalb(opt_index_v3(k))*arprod(k))
+                      end do
+                    else  ! (using_im_bcsul)
+                      do k = KSRAD,KERAD
+                        arprod(k) = aerext(opt_index_v5(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                        arprod2(k) = aerssalb(opt_index_v5(k))*arprod(k)
+                        asymm(k)   = aerasymm(opt_index_v5(k))
+                        sum_ext(k) = sum_ext(k) + arprod(k)
+                        sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v5(k))*arprod(k)
+                        sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                              aerasymm(opt_index_v5(k)) * &
+                                 (aerssalb(opt_index_v5(k))*arprod(k))
+                      end do
+                    endif  !(using_im_bcsul)
+                  else if (Aerosol_props%optical_index(nsc) == &
+                                Aerosol_props%seasalt1_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v6(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v6(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v6(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v6(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                                aerasymm(opt_index_v6(k)) * &
+                                  (aerssalb(opt_index_v6(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                              Aerosol_props%seasalt2_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v7(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v7(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v7(k))
+                      sum_ext(k) = sum_ext(k) +  arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v7(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) + &
+                               aerasymm(opt_index_v7(k)) * &
+                                 (aerssalb(opt_index_v7(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                               Aerosol_props%seasalt3_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v8(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v8(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v8(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v8(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                              aerasymm(opt_index_v8(k)) * &
+                                  (aerssalb(opt_index_v8(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                               Aerosol_props%seasalt4_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v9(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v9(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v9(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                     aerssalb(opt_index_v9(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +  &
+                                aerasymm(opt_index_v9(k))*  &
+                                   (aerssalb(opt_index_v9(k))*arprod(k))
+                    end do
+                  else if (Aerosol_props%optical_index(nsc) == &
+                             Aerosol_props%seasalt5_flag) then
+                    do k = KSRAD,KERAD
+                      arprod(k) = aerext(opt_index_v10(k)) *    &
+                                   (1.e3 * Aerosol%aerosol(i,j,k,nsc))
+                      arprod2(k) = aerssalb(opt_index_v10(k))*arprod(k)
+                      asymm(k)   = aerasymm(opt_index_v10(k))
+                      sum_ext(k) = sum_ext(k) + arprod(k)
+                      sum_sct(k) = sum_sct(k) + &
+                                    aerssalb(opt_index_v10(k))*arprod(k)
+                      sum_g_omega_tau(k) = sum_g_omega_tau(k) +&
+                              aerasymm(opt_index_v10(k)) * &
+                                 (aerssalb(opt_index_v10(k))*arprod(k))
+                    end do
+                  endif
+
+                  if (Sw_control%do_cmip_diagnostics) then
+                    if (nband == Solar_spect%visible_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,1) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,1) =    &
+                                            arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,1) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%eight70_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,6) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,6) =    &
+                                            arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,6) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%one_micron_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,2) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,2) =    &
+                                               arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,2) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%w340_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,7) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,7) =    &
+                                                arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,7) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%w380_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,8) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,8) =    &
+                                                arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,8) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%w440_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,9) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,9) =    &
+                                               arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,9) = asymm(:)
+                    endif
+                    if (nband == Solar_spect%w670_band_indx) then
+                      Aerosol_diags%extopdep(i,j,:,nsc,10) = arprod(:)
+                      Aerosol_diags%absopdep(i,j,:,nsc,10) =    &
+                                                arprod(:) - arprod2(:)
+                      Aerosol_diags%asymdep(i,j,:,nsc,10) = asymm(:)
+                    endif
+                  endif
+                end do
+
+!----------------------------------------------------------------------
+!    add the effects of volcanic aerosols, if they are to be included.
+!    include generation of diagnostics in the visible (0.55 micron) and
+!    nir band (1.0 micron).
+!----------------------------------------------------------------------
+                if (including_volcanoes) then
+                  do k = KSRAD,KERAD
+                    sum_ext(k) = sum_ext(k) +    &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                    sum_sct(k) = sum_sct(k) +    &
+                                 Aerosol_props%sw_ssa(i,j,k,nband)*  &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                    sum_g_omega_tau(k) =   &
+                                 sum_g_omega_tau(k) +&
+                                 Aerosol_props%sw_asy(i,j,k,nband)* &
+                                 Aerosol_props%sw_ssa(i,j,k,nband)*  &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                    if (Sw_control%do_cmip_diagnostics) then
+                      if (nband == Solar_spect%visible_band_indx) then
+                           Aerosol_diags%extopdep_vlcno(i,j,k,1) =   &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                           Aerosol_diags%absopdep_vlcno(i,j,k,1) =   &
+                            (1.0 - Aerosol_props%sw_ssa(i,j,k,nband))*&
+                                Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                deltaz(k)
+                      endif
+                      if (nband == Solar_spect%eight70_band_indx) then
+                           Aerosol_diags%extopdep_vlcno(i,j,k,3) =   &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                           Aerosol_diags%absopdep_vlcno(i,j,k,3) =   &
+                            (1.0 - Aerosol_props%sw_ssa(i,j,k,nband))*&
+                                Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                deltaz(k)
+                      endif
+                      if (nband == Solar_spect%one_micron_indx) then
+                           Aerosol_diags%extopdep_vlcno(i,j,k,2) =   &
+                                 Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                 deltaz(k)
+                           Aerosol_diags%absopdep_vlcno(i,j,k,2) =   &
+                            (1.0 - Aerosol_props%sw_ssa(i,j,k,nband))*&
+                                Aerosol_props%sw_ext(i,j,k,nband)*  &
+                                deltaz(k)
+                      endif
+                    endif
+                  end do
+                endif   ! (including_volcanoes)
+!
+!----------------------------------------------------------------------
+                do k = KSRAD,KERAD
+                  aeroextopdep(i,j,k,nband) = sum_ext(k) 
+                  aerosctopdep(i,j,k,nband) = sum_sct(k) 
+                  aeroasymfac(i,j,k,nband) = sum_g_omega_tau(k) / &
+                                                (sum_sct(k) + 1.0e-30 )
+                end do
+              else  ! (if not including_aerosols)
+                do k = KSRAD,KERAD
+                  aeroextopdep(i,j,k,nband) = 0.0                    
+                  aerosctopdep(i,j,k,nband) = 0.0                  
+                  aeroasymfac(i,j,k,nband) = 0.0                 
+                end do
+              endif ! (including_aerosols)
+            end do ! (nband)
+          endif  ! (daylight or cmip_diagnostics)
+
+        end do ! (i loop)
+      end do   ! (j loop)
+
+!---------------------------------------------------------------------
+!
+
+!---------------------------------------------------------------------
+
+
+end subroutine compute_aerosol_optical_props
+
 !#################################################################
 ! <SUBROUTINE NAME="compute_gas_props">
 !  <OVERVIEW>
@@ -2173,37 +2734,58 @@ end subroutine esfsw_driver_end
 !    the allocated memory at the end of the subroutine.
 !  </DESCRIPTION>
 !  <TEMPLATE>
-!   call compute_gas_props (press, pflux, rh2o, deltaz,
-!                           qo3, rrvco2, rrvch4, rrvn2o, cosz,
-!                           daylight, gasopdep)
+!   call comput(is, ie, js, je, Atmos_input, Surface, Rad_gases, Aerosol, 
+!               Astro, &
+!               Cldrad_props, Cld_spec, Sw_output)
 !  </TEMPLATE>
-!  <IN NAME="press" TYPE="real">
-!    layer pressures (mks units) (does not include sfc)
+!  <IN NAME="is" TYPE="integer">
+!    starting subdomain i indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="pflux" TYPE="real">
-!    interface pressures (mks units)
+!  <IN NAME="ie" TYPE="integer">
+!    ending subdomain i indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="rh2o" TYPE="real">
-!    h2o mixing ratio
+!  <IN NAME="js" TYPE="integer">
+!    starting subdomain j indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="deltaz" TYPE="real">
-!    layer thickness in meters
+!  <IN NAME="je" TYPE="integer">
+!    ending subdomain j indices of data in 
+!                   the physics_window being integrated
 !  </IN>
-!  <IN NAME="cosz" TYPE="real">
-!    cosine of the zenith angle
+!  <IN NAME="Atmos_input" TYPE="atmos_input_type">
+!    Atmos_input_type variable containing the atmospheric
+!    input fields on the radiation grid 
+!  </IN>
+!  <IN NAME="Aerosol" TYPE="aerosol_type">
+!   Aerosol input data for shortwave radiation calculation
+!  </IN>
+!  <IN NAME="Astro" TYPE="astronomy_type">
+!    Astronomy_type variable containing the astronomical
+!    input fields on the radiation grid  
 !  </IN>
 !  <IN NAME="Rad_gases" TYPE="radiative_gases_type">
 !    Radiative_gases_type variable containing the radiative 
 !    gas input fields on the radiation grid 
 !  </IN>
+!  <IN NAME="Cldrad_props" TYPE="cldrad_properties_type">
+!    The cloud radiative property input fields on the
+!    radiation grid
+!  </IN>
 !  <INOUT NAME="Sw_output" TYPE="sw_output_type">
 !    The shortwave radiation calculation result
 !  </INOUT>
+!  <IN NAME="Surface" TYPE="surface_type">
+!   Surface data as boundary condition to radiation
+!  </IN>
+!  <IN NAME="Cld_spec" TYPE="cld_specification_type">
+!   Cloud specification data as initial condition to radiation
+!  </IN>
 ! </SUBROUTINE>
 
-   subroutine compute_gas_props (press, pflux, temp, rh2o, deltaz, &
-                                 qo3, rrvco2, rrvch4, rrvn2o, &
-                                 cosz, daylight, gasopdep)
+subroutine compute_gas_props (Atmos_input, Rad_gases, Astro,   &
+                              daylight, gasopdep)
 
 !----------------------------------------------------------------------
 !    comput uses the delta-eddington technique in conjunction with a    
@@ -2212,8 +2794,9 @@ end subroutine esfsw_driver_end
 !    notes: drops are assumed if temp>273.15K, ice crystals otherwise.
 !-------------------------------------------------------------------
 
-real, dimension(:,:,:),        intent(in)    :: press, pflux, temp, rh2o, deltaz, qo3, cosz
-real,                          intent(in)    :: rrvco2, rrvch4, rrvn2o
+type(atmos_input_type),        intent(in)    :: Atmos_input
+type(radiative_gases_type),    intent(in)    :: Rad_gases   
+type(astronomy_type),          intent(in)    :: Astro
 logical, dimension(:,:),       intent(in)    :: daylight
 real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep              
 
@@ -2221,14 +2804,12 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 !-------------------------------------------------------------------
 !  intent(in) variables:
 !
-!      press          layer pressures (mks units) (does not include sfc)
-!      pflux          interface pressures (mks units)
-!      rh2o           h2o mixing ratio
-!      deltaz         layer thickness in meters
+!      Atmos_input    atmos_input_type structure, contains variables
+!                     defining atmospheric state
 !      Rad_gases      radiative_gases_type structure, contains var-
 !                     iables defining the radiatively active gases, 
 !                     passed through to lower level routines
-!      cosz           cosine of the zenith angle
+!      Astro          astronomy_type structure
 !                                                                 
 !   intent(inout) variables:
 !
@@ -2240,7 +2821,8 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 !     local variables:
  
 
-      real, dimension (size(press,3))  :: &
+      real, dimension (size(Atmos_input%temp,3)-1)  :: &
+                   deltaz,     qo3,         rh2o,                    &
                    efftauo2,   efftauco2,   efftauch4,   efftaun2o, &
                    wh2ostr,    wo3,         wo2,         quenchfac, &
                    opdep,      delpdig,     deltap,      tco2,    &
@@ -2248,22 +2830,21 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 		   wh2octms,   wh2octmf     
 
            
-      real, dimension (size(pflux,3))  :: &
+      real, dimension (size(Atmos_input%temp,3))  :: &
             alphaco2,        alphaco2str,    alphao2,          &
             alphao2str,      alphach4,       alphach4str,      &
             alphan2o,        alphan2ostr,    scale,            &
             scalestr,        totco2,         totco2str,        &
             toto2,           toto2str,       totch4,           &
             totch4str,       totn2o,         totn2ostr,        &
-            pflux_mks,       z
-
-      real, dimension (size(press,3)) :: sumwco2, sumwco2str
-      real, dimension (size(pflux,3)) :: dnfitco2, sumdnfitco2
-      real, dimension (size(press,3)) :: tauco2
+            press,           pflux,          pflux_mks,        &
+            temp,            z
 
       real :: cosangsolar
       real :: denom
       real :: wtquench
+      real :: rrvco2 
+      real :: rrvch4, rrvn2o
       real :: h2o_conv
 
       integer  :: j, i, k, ng, nband, kq
@@ -2288,9 +2869,9 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
       israd = 1
       jsrad = 1
       ksrad = 1
-      ierad = size(press,1)
-      jerad = size(press,2)
-      kerad = size(press,3)
+      ierad = size(Atmos_input%temp,1)
+      jerad = size(Atmos_input%temp,2)
+      kerad = size(Atmos_input%temp,3) - 1
 
 !---------------------------------------------------------------------
 !    initialize local variables.                                        
@@ -2303,30 +2884,46 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
       alphach4str(1) = 0.0
       alphan2o   (1) = 0.0
       alphan2ostr(1) = 0.0
-
+      rrvco2 = Rad_gases%rrvco2
+      rrvch4 = Rad_gases%rrvch4
+      rrvn2o = Rad_gases%rrvn2o
       h2o_conv = 3.30E16
       wh2octms(:) = 0 
       wh2octmf(:) = 0
-
       do j = JSRAD,JERAD
         do i = ISRAD,IERAD
           if ( daylight(i,j) ) then
 
+!---------------------------------------------------------------------
+!  convert to cgs and then back to mks for consistency with previous 
+!---------------------------------------------------------------------
+            do k = KSRAD,KERAD+1
+              press(k) = 0.1*(10.0*Atmos_input%press(i,j,k))
+              pflux(k) =     (10.0*Atmos_input%pflux(i,j,k))
+              temp (k) = Atmos_input%temp  (i,j,k)
+            end do
+            do k = KSRAD,KERAD
+              rh2o  (k) = Atmos_input%rh2o  (i,j,k)
+              qo3   (k) = Rad_gases%qo3(i,j,k)
+              deltaz(k) = Atmos_input%deltaz(i,j,k)
+            end do
+
 !----------------------------------------------------------------------c
 !    define pressure related quantities, pressure is in mks units. 
 !----------------------------------------------------------------------c
+            pflux_mks(:) = pflux(:)*1.0E-1
 
             do k = KSRAD+1,KERAD+1
-              deltap(k-1) = pflux(i,j,k) - pflux(i,j,k-1)
+              deltap(k-1) = pflux_mks(k) - pflux_mks(k-1)
               delpdig(k-1) = deltap(k-1)/ GRAV
-              scalestr(k) = pflux(i,j,k) 
-              scale(k) = scalestr(k)*pflux(i,j,k)/pstd_mks
+              scalestr(k) = pflux_mks(k) 
+              scale(k) = scalestr(k)*pflux_mks(k)/pstd_mks
             end do
  
 
             do k = KSRAD,KERAD
-              wh2ostr(k) = rh2o(i,j,k)*delpdig(k)
-              wo3(k)     = qo3(i,j,k)*delpdig(k)
+              wh2ostr(k) = rh2o(k)*delpdig(k)
+              wo3(k)     = qo3(k)*delpdig(k)
               wo2(k) = o2mixrat*(WTMO2/WTMAIR)*delpdig(k)
             end do
   
@@ -2337,7 +2934,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
             if (do_quench) then
               z(KERAD+1) = 0.0
               do k = KERAD,KSRAD,-1
-                z(k) = z(k+1) + deltaz(i,j,k)
+                z(k) = z(k+1) + deltaz(k)
               end do
           
 !---------------------------------------------------------------------
@@ -2369,12 +2966,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 
 
             do ng = 1,NSOLWG
-              if (size(cosz,3) == 1) then
-                 cosangsolar = cosz(i,j,1)
-              else
-                 cosangsolar = sum(cosz(i,j,:))/size(cosz,3) ! will not bit-reproduce
-                                                             ! but this is not the usual case
-              endif
+              cosangsolar  = Astro%cosz(i,j)
               if (cosangsolar == 0.0) cosangsolar = 1.0
 
 !----------------------------------------------------------------------c
@@ -2403,7 +2995,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
               do nband = 1, NBANDS
 
 !-------------------------------------------------------------------
-!    define the h2o scaled gas amounts in kgrams/meter**2
+!    Define the h2o scaled gas amounts in kgrams/meter**2     
 !    
 !    Define the h2o self and foriegn continuum scaled gas amounts
 !    in molecules/(cm**2*atm) 
@@ -2439,19 +3031,21 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 !    The temperature dependence of the foriegn continuum has the form
 !    296/T). 
 !     
+! 		
+!
 !---------------------------------------------------------------------
                 if (nband <= nh2obands) then
      
 		  do k = KSRAD,KERAD
-                    wh2o(k) = rh2o(i,j,k)*delpdig(k)*   &
-                        exp(powph2o(nband)*alog(press(i,j,k)*p0h2o(nband)))
-                    if (do_sw_continuum) then 
-                       wh2octms(k) = (h2o_conv/0.622)*press(i,j,k)*rh2o(i,j,k)**2 &
-                            *delpdig(k)*exp(1500.*((1./temp(i,j,k)) -3.38E-3))&
-                            *(296./temp(i,j,k))
-                       wh2octmf(k) = h2o_conv*press(i,j,k)*rh2o(i,j,k)&
-                            *delpdig(k)*(296./temp(i,j,k)) - wh2octms(k)     
-                    end if 
+                    wh2o(k) = rh2o(k)*delpdig(k)*   &
+                        exp(powph2o(nband)*alog(press(k)*p0h2o(nband)))
+		    If (do_sw_continuum) then 
+		       wh2octms(k) = (h2o_conv/0.622)*press(k)*rh2o(k)**2 &
+		       *delpdig(k)*exp(1500.*((1./temp(k)) -3.38E-3))&
+		       *(296./temp(K))
+		        wh2octmf(k) = h2o_conv*press(k)*rh2o(k)&
+		       *delpdig(k)*(296./temp(K)) - wh2octms(k)     
+		    End if 
 		  end do
 
 !---------------------------------------------------------------------
@@ -2460,7 +3054,6 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 !    note: for large zenith angles, alpha can exceed 1. In this case,a
 !    the optical depths are set to the previous layer values.          
 !-------------------------------------------------------------------
-                  if (nbands == 18 .and. nfrqpts == 38) then
                   if ( c1co2(nband).ne.1.0E-99 ) then
                     do k = KSRAD+1,KERAD+1
                       if (totco2(k) < totco2max(nband) .and.  &
@@ -2483,65 +3076,11 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
                         efftauco2(k-1) = efftauco2(k-2)
                       else
                         efftauco2(k-1) = 0.0
-                        endif
+                      end if
                     end do
                   else    !( c1co2(nband).ne.1.0E-99 ) 
                     efftauco2(:) = 0.0
                   end if  !( c1co2(nband).ne.1.0E-99 ) 
-
-                  else  ! nbands
-
-                    if (do_co2_sw_effects) then
-                      if (nband.le.NCO2BANDS) then
-                        do k = KSRAD,KERAD
-                          if (k.eq.1) then
-                            sumwco2(k) = 0.1 * rrvco2 * (WTMCO2/WTMAIR) * delpdig(k) *   &
-                                         exp( powpco2(nband) * alog( press(i,j,k)*p0co2(nband) ) )
-                            sumwco2str(k) = 0.1 * rrvco2*(WTMCO2/WTMAIR)*delpdig(k)
-                          else
-                            sumwco2(k) = sumwco2(k-1) + &
-                                         0.1 * rrvco2 * (WTMCO2/WTMAIR) * delpdig(k) * &
-                                         exp( powpco2(nband) * alog( press(i,j,k)*p0co2(nband) ) )
-                            sumwco2str(k) = sumwco2str(k-1) + &
-                                            0.1 * rrvco2 * (WTMCO2/WTMAIR) * delpdig(k)
-                          endif
-                        end do
-                        sumdnfitco2 = 0.0
-                        do nf = 1,nfreqptsco2(nband)
-                          dnfitco2(1) = 1.0
-                          if (.not.strtermco2(nf,nband)) then
-                            do k = KSRAD,KERAD
-                              tauco2(k) = kco2(nf,nband) * sumwco2(k)
-                            end do
-                          endif
-                          if (strtermco2(nf,nband)) then
-                            do k = KSRAD,KERAD
-                              tauco2(k) = kco2(nf,nband) * sumwco2str(k)
-                            end do
-                          endif
-                          do k = KSRAD,KERAD
-                            dnfitco2(k+1) = exp(-tauco2(k)/cosangsolar)
-                          end do
-
-                          sumdnfitco2(1) = 1.0
-                          do k = KSRAD+1,KERAD+1
-                            sumdnfitco2(k) = sumdnfitco2(k) + wtfreqco2(nf,nband) * dnfitco2(k)
-                          end do
-
-                        end do ! nf
-
-                        do k = KSRAD,KERAD
-                          efftauco2(k) = -cosangsolar * alog( sumdnfitco2(k+1)/sumdnfitco2(k) )
-                        end do
- 
-                      else  ! nband.le.NCO2BANDS
-                        efftauco2(:) = 0.0
-                      endif
-
-                    else ! do_co2_sw_effects
-                      efftauco2(:) = 0.0
-                    endif
-                  endif ! nband
 
                   if (do_ch4_sw_effects) then
                     if (c1ch4(nband).ne.1.0E-99 ) then
@@ -2607,68 +3146,32 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
                      efftaun2o(:) = 0.0
                    end if
 
-                  if (do_o2_sw_effects .and. c1o2(nband).ne.1.0E-99 ) then
+                  if ( c1o2(nband).ne.1.0E-99 ) then
                     do k = KSRAD+1,KERAD+1
-                      if (reproduce_ulm) then
                       if (toto2(k) .lt. toto2max(nband) .and.   &
                           toto2str(k) .lt. toto2strmax(nband)) then
                         alphao2(k) = c1o2(nband)*exp( c3o2(nband)* &
                                      alog((toto2(k) + c2o2(nband)))) - &
                                                             c4o2(nband)
-                          alphao2str(k) = &
-                                  c1o2str(nband)*exp(c3o2str(nband)*  &
-                                      alog((toto2str(k) + c2o2str(nband)))) &
-                                                              - c4o2str(nband)
-                          to2(k-1) = &
-                                     (1.0 - alphao2(k))*  &
-                                          (1.0 - alphao2str(k) )/ &
-                                      ((1.0 - alphao2(k-1)) *  &
-                                                  (1.0 - alphao2str(k-1)))
-
-                          efftauo2(k-1) = -cosangsolar*alog(to2(k-1))
-
-                        else if (k.gt.KSRAD+1) then
-                          efftauo2(k-1) = efftauo2(k-2)
-                        else
-                          efftauo2(k-1) = 0.0 
-                        end if
-
-                      else ! reproduce_ulm
-                        if (toto2(k) .lt. toto2max(nband) .or.   &   
-                            toto2str(k) .lt. toto2strmax(nband)) then
-                          if (toto2(k) .lt. toto2max(nband)) then
-                            alphao2(k) = c1o2(nband)*exp( c3o2(nband)* &
-                                          alog((toto2(k) + c2o2(nband)))) - &
-                                                              c4o2(nband)
-                          else
-                            alphao2(k) = 0.0 
-                          end if
-                          if (toto2str(k) .lt. toto2strmax(nband)) then
-                            alphao2str(k) = & 
+                        alphao2str( k) = &
                             c1o2str(nband)*exp(c3o2str(nband)*  &
                                 alog((toto2str(k) + c2o2str(nband)))) &
                                                         - c4o2str(nband)
-                          else
-                            alphao2str(k) = 0.0 
-                          end if
                         to2(k-1) = &
                                (1.0 - alphao2(k))*  &
                                     (1.0 - alphao2str(k) )/ &
                                 ((1.0 - alphao2(k-1)) *  &
                                             (1.0 - alphao2str(k-1)))
-
                         efftauo2(k-1) = -cosangsolar*alog(to2(k-1))
                       else if (k.gt.KSRAD+1) then
                         efftauo2(k-1) = efftauo2(k-2)
                       else
                         efftauo2(k-1) = 0.0
                       end if
-                      end if ! reproduce_ulm
                     end do
                   else   !  ( c1o2(nband).ne.1.0E-99 ) 
                     efftauo2(:) = 0.0
                   end if  !  ( c1o2(nband).ne.1.0E-99 ) 
-
                 end if  ! (nband <= nh2obands)
  
 !---------------------------------------------------------------------
@@ -2708,8 +3211,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
                   else
                   opdep(:) = kh2o(np)*wh2o(:) + ko3(np)*wo3(:)  
 		  end if
-
-                  if (do_sw_continuum) then 
+                  If (do_sw_continuum) then 
                   gasopdep(i,j,:,np,ng) =    &
                   opdep(:) + quenchfac(:)*efftauco2(:) +   &
                   efftauo2(:) + efftauch4(:) + efftaun2o(:) &
@@ -2718,8 +3220,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
 	          gasopdep(i,j,:,np,ng) =    &
                   opdep(:) + quenchfac(:)*efftauco2(:) +   &
                   efftauo2(:) + efftauch4(:) + efftaun2o(:)
-                  end if
-
+		  end IF 
 		end do  ! (nf loop)
               end do   ! (nband loop)
             end do  ! (ng loop)
@@ -2728,6 +3229,7 @@ real, dimension(:,:,:,:,:),    intent(out)   :: gasopdep
       end do ! (j loop)
 
 !---------------------------------------------------------------------
+
 
 
 end subroutine compute_gas_props
@@ -2989,6 +3491,7 @@ real, dimension(:,:,:),   intent(out)  :: reflectance, transmittance, &
 end subroutine adding 
 
 
+
 !####################################################################
 ! <SUBROUTINE NAME="deledd">
 !  <OVERVIEW>
@@ -3151,6 +3654,9 @@ logical, dimension(:,:,:), intent(in), optional    :: cloud
 !
 !---------------------------------------------------------------------
 
+!---------------------------------------------------------------------
+!
+!---------------------------------------------------------------------
       do k=1,kx         
         do j=1,jx         
 
@@ -3214,9 +3720,9 @@ logical, dimension(:,:,:), intent(in), optional    :: cloud
 !----------------------------------------------------------------------
           do nn=1,ntot      
 
-!----------------------------------------------------------------------
+!----------------------------------------------------------------------c
 !    direct quantities                                            
-!----------------------------------------------------------------------
+!----------------------------------------------------------------------c
             ww(1) = omegastr2(nn)
             ww(2) = gstr2(nn)
             ww(3) = taustr2(nn)
@@ -3339,7 +3845,9 @@ logical, dimension(:,:,:), intent(in), optional    :: cloud
  
 end subroutine deledd
 
+
+
 !#####################################################################
 
-                   end module esfsw_driver_mod
 
+                   end module esfsw_driver_mod

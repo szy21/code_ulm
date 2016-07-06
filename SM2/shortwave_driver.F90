@@ -110,6 +110,7 @@ real    :: solar_scale_factor = -1.0  ! factor to multiply incoming solar
                                       ! perform no computation. used to 
                                       ! change "solar constant"
   
+
  
 namelist / shortwave_driver_nml /    do_cmip_diagnostics, &
 !                                    calculate_volcanic_sw_heating, &
@@ -413,7 +414,8 @@ subroutine shortwave_driver (press, pflux, temp, rh2o, &
                              asfc_vis_dif, asfc_nir_dif, Astro,   &
                              aeroasymfac, aerosctopdep, aeroextopdep,       &
                              Rad_gases, camtsw, cldsct, cldext, cldasymm,   &
-                             flag_stoch, Rad_control, Aerosolrad_control, Sw_output )
+                             flag_stoch, Rad_control, Aerosolrad_control, Sw_output, &
+                             local_solar_forcing ) ! 052416[ZS]: add local_solar_forcing
 
 !---------------------------------------------------------------------
 !    shortwave_driver initializes shortwave radiation output variables, 
@@ -434,6 +436,7 @@ integer,                         intent(in)    :: flag_stoch
 type(radiation_control_type),    intent(in)    :: Rad_control
 type(aerosolrad_control_type),   intent(in)    :: Aerosolrad_control
 type(sw_output_type), dimension(:), intent(inout) :: Sw_output
+real, dimension(:,:),            intent(in)    :: local_solar_forcing
 
 !--------------------------------------------------------------------
 !  intent(in) variables:
@@ -477,7 +480,6 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
                            size(aeroasymfac,2), &
                            size(aeroasymfac,3), &
                            size(aeroasymfac,4))
-
 !---------------------------------------------------------------------
 !   local variables:
 !
@@ -636,7 +638,7 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
 !    if volcanic heating calculation not desired, simply call swresf.
 !----------------------------------------------------------------------
        !else
- 
+!
           if (Aerosolrad_control%do_swaerosol_forcing) then
 
 !-----------------------------------------------------------------------
@@ -655,7 +657,8 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
                                    camtsw, cldsct, cldext, cldasymm, &
                                    aerozero, aerozero, aerozero, &
                                    Rad_control%do_totcld_forcing, &
-                                   flag_stoch, Sw_output(Aerosolrad_control%indx_swaf))
+                                   flag_stoch, Sw_output(Aerosolrad_control%indx_swaf),&
+                                   local_solar_forcing)
             else
               call swresf_wrapper (Rad_control%nzens, &
                                    press, pflux, temp, rh2o, deltaz,  &
@@ -665,7 +668,8 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
                                    camtsw, cldsct, cldext, cldasymm, &
                                    aeroasymfac, aerosctopdep, aeroextopdep, &
                                    Rad_control%do_totcld_forcing, &
-                                   flag_stoch, Sw_output(Aerosolrad_control%indx_swaf))
+                                   flag_stoch, Sw_output(Aerosolrad_control%indx_swaf),&
+                                   local_solar_forcing)
             endif
 
           endif ! do_swaerosol_forcing
@@ -682,7 +686,8 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
                                  camtsw, cldsct, cldext, cldasymm, &
                                  aeroasymfac, aerosctopdep, aeroextopdep, &
                                  Rad_control%do_totcld_forcing, &
-                                 flag_stoch, Sw_output(1))
+                                 flag_stoch, Sw_output(1), &
+                                 local_solar_forcing)
           else
             aerozero = 0.0
             call swresf_wrapper (Rad_control%nzens, &
@@ -693,7 +698,8 @@ type(sw_output_type), dimension(:), intent(inout) :: Sw_output
                                  camtsw, cldsct, cldext, cldasymm, &
                                  aerozero, aerozero, aerozero, &
                                  Rad_control%do_totcld_forcing, &
-                                 flag_stoch, Sw_output(1))
+                                 flag_stoch, Sw_output(1), &
+                                 local_solar_forcing)
           endif
        !endif
 
@@ -1022,7 +1028,8 @@ subroutine swresf_wrapper ( nzens, press, pflux, temp, rh2o, deltaz,  &
                             Rad_gases, Astro, &
                             camtsw, cldsct, cldext, cldasymm, &
                             aeroasymfac, aerosctopdep, aeroextopdep, &
-                            do_totcld_forcing, flag_stoch, Sw_output )
+                            do_totcld_forcing, flag_stoch, Sw_output, &
+                            local_solar_forcing ) ! 052416[ZS] add local_solar_forcing
 
 integer,                    intent(in)    :: nzens
 real, dimension(:,:,:),     intent(in)    :: press, pflux, temp, rh2o, deltaz
@@ -1036,6 +1043,7 @@ real,dimension(:,:,:,:),    intent(in)    :: aeroasymfac, aerosctopdep, aeroexto
 logical,                    intent(in)    :: do_totcld_forcing
 integer,                    intent(in)    :: flag_stoch
 type(sw_output_type),       intent(inout) :: Sw_output
+real, dimension(:,:),       intent(in)    :: local_solar_forcing
 
 real, dimension(size(Astro%cosz,1), &
                 size(Astro%cosz,2), &
@@ -1065,7 +1073,7 @@ integer :: kx
                 Astro%rrsun, cosz, fracday, &
                 camtsw, cldsct, cldext, cldasymm, &
                 aeroasymfac, aerosctopdep, aeroextopdep, &
-                do_totcld_forcing, flag_stoch, Sw_output)
+                do_totcld_forcing, flag_stoch, Sw_output, local_solar_forcing)
 
 end subroutine swresf_wrapper
 
