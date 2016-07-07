@@ -384,7 +384,7 @@ character(len=16) :: cosp_precip_sources = '    '
                                ! currently not considered as precip
                                ! sources.
 
-
+! 052416[ZS]
 logical     :: add_solar_forcing = .false.
 real        :: solar_forcing_mag = 0.0
 real        :: solar_forcing_center = 0.0
@@ -2088,7 +2088,7 @@ real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
 !    tive fluxes and heating rates.
 !---------------------------------------------------------------------
       call mpp_clock_begin (calc_clock)
-      !++zs: add asymmetric forcing [052416]
+      !++ZS: add asymmetric forcing [052416]
       if (add_solar_forcing) then
          solar_forcing_center_rad = solar_forcing_center * PI / 180.0
          c_solar_forcing = solar_forcing_width * PI / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
@@ -2098,7 +2098,7 @@ real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
       else
          scaled_solar_forcing(:,:) = 0
       endif
-      !--zs
+      !--ZS
       if (do_rad) then
         call radiation_calc (is, ie, js, je, lat, lon, &
                              Atmos_input%press, Atmos_input%pflux,  &
@@ -4396,7 +4396,7 @@ type(rad_output_type),         intent(inout)         :: Rad_output
 type(lw_output_type), dimension(:), intent(inout)    :: Lw_output
 type(sw_output_type), dimension(:), intent(inout)    :: Sw_output
 type(lw_diagnostics_type),          intent(inout)    :: Lw_diagnostics
-real, dimension(:,:),          intent(in)            :: local_solar_forcing
+real, dimension(:,:),          intent(in)            :: local_solar_forcing ! 052416[ZS]
 
 !-----------------------------------------------------------------------
 !    intent(in) variables:
@@ -4471,7 +4471,7 @@ real, dimension(:,:),          intent(in)            :: local_solar_forcing
                         camtsw, cldsct, cldext, cldasymm, &
                         flag_stoch, Rad_control, Aerosolrad_control, &
                         Lw_output, Sw_output, Lw_diagnostics, &
-                        local_solar_forcing)
+                        local_solar_forcing) ! 052416[ZS]
 
 
 !---------------------------------------------------------------------

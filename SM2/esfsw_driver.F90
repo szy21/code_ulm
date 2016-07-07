@@ -1021,7 +1021,7 @@ real, dimension(nbands),       intent(in)    :: solflxband
 logical,                       intent(in)    :: do_totcld_forcing
 integer,                       intent(in)    :: flag_stoch
 type(sw_output_type),          intent(inout) :: Sw_output   
-real, dimension(:,:),          intent(in)    :: local_solar_forcing
+real, dimension(:,:),          intent(in)    :: local_solar_forcing ! 052416[ZS]
 
 
 !-------------------------------------------------------------------

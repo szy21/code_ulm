@@ -1056,7 +1056,8 @@ subroutine swresf (is, ie, js, je, Atmos_input, Surface, Rad_gases,  &
                    Aerosol, Aerosol_props, Astro, Cldrad_props,  &
                    Cld_spec, including_volcanoes, Sw_output,   &
                    Aerosol_diags, including_aerosols,   &
-                   naerosol_optical) 
+                   naerosol_optical, &
+                   local_solar_forcing)  ! 070616[ZS]: add local_solar_forcing
 
 !----------------------------------------------------------------------
 !    swresf uses the delta-eddington technique in conjunction with a    
@@ -1079,6 +1080,7 @@ type(sw_output_type),          intent(inout) :: Sw_output
 type(aerosol_diagnostics_type),intent(inout) :: Aerosol_diags
 logical,                       intent(in)    :: including_aerosols  
 integer,                       intent(in)    :: naerosol_optical
+real, dimension(:,:),          intent(in)    :: local_solar_forcing ! 052416[ZS]
 
 
 !-------------------------------------------------------------------
@@ -1864,7 +1866,7 @@ integer,                       intent(in)    :: naerosol_optical
             endif
             solarflux_p(:,:) = fracday_p(:,:)*  &
                                    Solar_spect%solflxband(nband)*  &
-                                                      ssolar/solflxtotal_local
+                                                      (ssolar+local_solar_forcing(:,:))/solflxtotal_local ! 070616[ZS]
  
             if (nband == Solar_spect%visible_band_indx) then
               Sw_output%bdy_flx(:,:,1,nz) =   &

@@ -343,7 +343,8 @@ end subroutine shortwave_driver_init
 subroutine shortwave_driver (is, ie, js, je, Atmos_input, Surface,  &
                              Astro, Aerosol, Aerosol_props, Rad_gases, &
                              Cldrad_props,  Cld_spec, Sw_output,      &
-                             Cldspace_rad, Aerosol_diags) 
+                             Cldspace_rad, Aerosol_diags, &
+                             local_solar_forcing)   ! 070616[ZS]
 
 !---------------------------------------------------------------------
 !    shortwave_driver initializes shortwave radiation output variables, 
@@ -364,6 +365,7 @@ type(cld_specification_type),    intent(in)    :: Cld_spec
 type(sw_output_type), dimension(:), intent(inout) :: Sw_output
 type(cld_space_properties_type), intent(inout) :: Cldspace_rad
 type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
+real, dimension(:,:),            intent(in)    :: local_solar_forcing ! 070616[ZS]
 
 !--------------------------------------------------------------------
 !  intent(in) variables:
@@ -528,7 +530,8 @@ type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
                        Aerosol, Aerosol_props, Astro, Cldrad_props,  &
                        Cld_spec, .false., Sw_output_std, Aerosol_diags, &
 !                      Sw_control%do_swaerosol)
-                       Sw_control%do_swaerosol, naerosol_optical)
+                       Sw_control%do_swaerosol, naerosol_optical, &
+                       local_solar_forcing) ! 070616[ZS]
           Aerosol_diags%sw_heating_vlcno = Sw_output_std%hsw 
 
 !----------------------------------------------------------------------
@@ -572,7 +575,8 @@ type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
                        Aerosol, Aerosol_props, Astro, Cldrad_props,  &
                        Cld_spec, Rad_control%volcanic_sw_aerosols, &
                        Sw_output_std, Aerosol_diags, &
-                       Sw_control%do_swaerosol, naerosol_optical)
+                       Sw_control%do_swaerosol, naerosol_optical, &
+                       local_solar_forcing) ! 070616[ZS]
 
 !----------------------------------------------------------------------
 !    define the difference in heating rates betweenthe case with 
@@ -610,7 +614,8 @@ type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
                         Aerosol, Aerosol_props, Astro, Cldrad_props,  &
                         Cld_spec, Rad_control%volcanic_sw_aerosols, &
                         Sw_output_ad, Aerosol_diags,   &
-                        calc_includes_aerosols, naerosol_optical)  
+                        calc_includes_aerosols, naerosol_optical, &
+                        local_solar_forcing)   ! 070616[ZS]
             Sw_output(Rad_control%indx_swaf) = Sw_output_ad
          endif
  
@@ -626,7 +631,8 @@ type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
                        Aerosol, Aerosol_props, Astro, Cldrad_props,  &
                        Cld_spec, Rad_control%volcanic_sw_aerosols, &
                        Sw_output_std, Aerosol_diags,  &
-                       Sw_control%do_swaerosol, naerosol_optical)
+                       Sw_control%do_swaerosol, naerosol_optical, &
+                       local_solar_forcing)   ! 070616[ZS]
             Sw_output(1) = Sw_output_std
         endif
 

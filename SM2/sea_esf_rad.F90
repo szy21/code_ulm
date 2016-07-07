@@ -398,7 +398,8 @@ type(aerosolrad_control_type), intent(in)    :: Aerosolrad_control
 type(lw_output_type), dimension(:), intent(inout)  :: Lw_output
 type(sw_output_type), dimension(:), intent(inout)  :: Sw_output 
 type(lw_diagnostics_type)         , intent(inout)  :: Lw_diagnostics
-real, dimension(:,:), intent(in)      :: local_solar_forcing
+real, dimension(:,:), intent(in)      :: local_solar_forcing ! 052416[ZS]
+
 !---------------------------------------------------------------------
 !  intent(in) variables:
 !

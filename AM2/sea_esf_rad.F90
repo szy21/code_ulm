@@ -360,7 +360,7 @@ end subroutine sea_esf_rad_endts
 subroutine sea_esf_rad (is, ie, js, je, Rad_time, Atmos_input, Surface,&
                         Astro, Rad_gases, Aerosol, Aerosol_props,    &
                         Cldrad_props, Cld_spec, Lw_output, Sw_output, &
-                        Aerosol_diags)
+                        Aerosol_diags, local_solar_forcing) ! 070616[ZS]
 
 !-----------------------------------------------------------------------
 !     sea_esf_rad calls the modules which calculate the long- and short-
@@ -381,6 +381,8 @@ type(cld_specification_type), intent(in)     :: Cld_spec
 type(lw_output_type), dimension(:), intent(inout)  :: Lw_output
 type(sw_output_type), dimension(:), intent(inout)  :: Sw_output 
 type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
+real, dimension(:,:), intent(in)      :: local_solar_forcing ! 070616[ZS]
+
 !---------------------------------------------------------------------
 !  intent(in) variables:
 !
@@ -466,7 +468,7 @@ type(aerosol_diagnostics_type), intent(inout)  :: Aerosol_diags
       call shortwave_driver (is, ie, js, je, Atmos_input, Surface,  &
                              Astro, Aerosol, Aerosol_props, Rad_gases, &
                              Cldrad_props, Cld_spec, Sw_output,   &
-                             Cldspace_rad, Aerosol_diags)
+                             Cldspace_rad, Aerosol_diags, local_solar_forcing) ! 070616[ZS]
       call mpp_clock_end (shortwave_clock)
     endif
 

@@ -436,7 +436,7 @@ integer,                         intent(in)    :: flag_stoch
 type(radiation_control_type),    intent(in)    :: Rad_control
 type(aerosolrad_control_type),   intent(in)    :: Aerosolrad_control
 type(sw_output_type), dimension(:), intent(inout) :: Sw_output
-real, dimension(:,:),            intent(in)    :: local_solar_forcing
+real, dimension(:,:),            intent(in)    :: local_solar_forcing ! 052416[ZS]
 
 !--------------------------------------------------------------------
 !  intent(in) variables:
