@@ -949,6 +949,9 @@ real, allocatable, dimension(:,:,:,:) ::  dfswcf_ad_save, ufswcf_ad_save
 real, allocatable, dimension(:,:)   ::  olr_ad_save, lwups_ad_save, &
                                         lwdns_ad_save, olr_ad_clr_save, &
                                     lwups_ad_clr_save, lwdns_ad_clr_save
+!ZS
+real, allocatable, dimension(:,:)   ::  cosz_ann, solar_ann, fracday_ann 
+real    :: rrsun_ann
 
 !-----------------------------------------------------------------------
 !    time-step-related constants
@@ -1272,7 +1275,9 @@ type(radiation_flux_type),       intent(in)  :: Rad_flux
       integer           ::   yr, month, year, dum
       integer           ::   ico2
       integer           ::   nzens
-
+      ! ZS
+      real, allocatable, dimension(:,:)   ::  lat 
+      integer           :: j
 !---------------------------------------------------------------------
 !   local variables
 ! 
@@ -1947,6 +1952,19 @@ type(radiation_flux_type),       intent(in)  :: Rad_flux
         endif
       endif
 
+!++ZS
+    if (add_solar_forcing) then
+      allocate (cosz_ann (id,jd))
+      allocate (solar_ann (id,jd))
+      allocate (fracday_ann (id,jd))
+      allocate (lat (id,jd))
+      do j = 1,jd
+        lat(:,j) = 0.5*(latb(:,j)+latb(:,j+1))
+      enddo
+      call annual_mean_solar (1, jd, lat, cosz_ann, solar_ann, fracday_ann, rrsun_ann)
+    endif
+!--ZS
+
 !---------------------------------------------------------------------
 !    allocate space for the global integrals being accumulated in 
 !    this module.
@@ -2552,8 +2570,8 @@ type(astronomy_inp_type),  intent(inout), optional :: Astronomy_inp
                                             lat_uniform, lon_uniform
       integer :: nz, nextinct
       ! 070616[ZS]: perturb solar radiation
-      real, dimension(ie-is+1,je-js+1)    :: solar_forcing, scaled_solar_forcing, cosz_ann, solar_ann, fracday_ann
-      real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
+      real, dimension(ie-is+1,je-js+1)    :: solar_forcing, scaled_solar_forcing
+      real  :: c_solar_forcing, solar_forcing_center_rad
  
 !-------------------------------------------------------------------
 !   local variables:
@@ -2701,8 +2719,7 @@ type(astronomy_inp_type),  intent(inout), optional :: Astronomy_inp
          solar_forcing_center_rad = solar_forcing_center * PI / 180.0
          c_solar_forcing = solar_forcing_width * PI / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
          solar_forcing(:,:) =  exp(-(lat(:,:) - solar_forcing_center_rad)**2 / (2.0 * (c_solar_forcing**2)))
-         call annual_mean_solar (js, je, lat, cosz_ann, solar_ann, fracday_ann, rrsun_ann)
-         scaled_solar_forcing(:,:) = solar_forcing / solar_ann * solar_forcing_mag * (1/solar_forcing_sf)
+         scaled_solar_forcing(:,:) = solar_forcing /solar_ann(:,js:je)  * solar_forcing_mag * (1/solar_forcing_sf)
       else
          scaled_solar_forcing(:,:) = 0
       endif

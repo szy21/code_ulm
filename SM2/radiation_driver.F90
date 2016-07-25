@@ -706,6 +706,9 @@ integer                :: vers ! version number of the restart file being read
 !          extinction    SW extinction (band 4 centered on 1 micron) for volcanoes
 
 type(rad_output_type),save          ::  Rad_output
+!ZS
+real, allocatable, dimension(:,:)   ::  cosz_ann, solar_ann, fracday_ann
+real    :: rrsun_ann
 
 !-----------------------------------------------------------------------
 !    time-step-related constants
@@ -919,6 +922,9 @@ type(radiation_flux_type),   intent(inout) :: Rad_flux(:)
       integer           ::   ico2
 
       character(len=16) ::  cosp_precip_sources_modified
+! ZS
+      real, allocatable, dimension(:,:)   ::  lat
+      integer           :: j
 
 !---------------------------------------------------------------------
 !   local variables
@@ -1164,6 +1170,18 @@ type(radiation_flux_type),   intent(inout) :: Rad_flux(:)
                        ' solar radiation', FATAL)
      endif
 
+!++ZS
+     if (add_solar_forcing) then
+       allocate (cosz_ann (id,jd))
+       allocate (solar_ann (id,jd))
+       allocate (fracday_ann (id,jd))
+       allocate (lat (id,jd))
+       do j = 1,jd
+         lat(:,j) = 0.5*(latb(:,j)+latb(:,j+1))
+       enddo
+       call annual_mean_solar (1, jd, lat, cosz_ann, solar_ann, fracday_ann, rrsun_ann)
+     endif
+!--ZS
 
 !----------------------------------------------------------------------
 !    store the controls for hires cloudy coszen calculations.
@@ -1887,8 +1905,8 @@ real, dimension(:,:,:),   pointer :: t, p_full, p_half, z_full, z_half, q
 real, dimension(:,:,:,:), pointer :: r, rm
 
 ! 052416[ZS]: perturb solar radiation
-real, dimension(ie-is+1,je-js+1)    :: solar_forcing, scaled_solar_forcing, cosz_ann, solar_ann, fracday_ann
-real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
+real, dimension(ie-is+1,je-js+1)    :: solar_forcing, scaled_solar_forcing
+real  :: c_solar_forcing, solar_forcing_center_rad
                 
 !-------------------------------------------------------------------
 !   local variables:
@@ -2093,8 +2111,7 @@ real  :: c_solar_forcing, solar_forcing_center_rad, rrsun_ann
          solar_forcing_center_rad = solar_forcing_center * PI / 180.0
          c_solar_forcing = solar_forcing_width * PI / (2.0 * 180.0 * sqrt(2.0 * log(100.0)))
          solar_forcing(:,:) =  exp(-(lat(:,:) - solar_forcing_center_rad)**2 / (2.0 * (c_solar_forcing**2)))
-         call annual_mean_solar (js, je, lat, cosz_ann, solar_ann, fracday_ann, rrsun_ann)
-         scaled_solar_forcing(:,:) = solar_forcing / solar_ann * solar_forcing_mag * (1/solar_forcing_sf)
+         scaled_solar_forcing(:,:) = solar_forcing / solar_ann(:,js:je) * solar_forcing_mag * (1/solar_forcing_sf)
       else
          scaled_solar_forcing(:,:) = 0
       endif
