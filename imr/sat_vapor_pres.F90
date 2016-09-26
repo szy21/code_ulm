@@ -507,7 +507,7 @@ private
 !  parameters for table size and resolution
 
  integer :: tcmin = -272  ! minimum temperature (degC) in lookup table ! 2016-02-15 [SKC]: Change from -160 to -272
- integer :: tcmax =  100  ! maximum temperature (degC) in lookup table
+ integer :: tcmax =  100  ! maximum temperature (degC) in lookup table ! 20160824 [ZS]: Change from 100 to ?
  integer :: esres =  10   ! table resolution (increments per degree)
  integer :: nsize  ! (tcmax-tcmin)*esres+1    !  lookup table size
  integer :: nlim   ! nsize-1

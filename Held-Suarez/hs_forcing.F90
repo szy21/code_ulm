@@ -68,6 +68,13 @@ private
 
    character(len=256) :: equilibrium_t_option = 'Held_Suarez'
    character(len=256) :: equilibrium_t_file='temp'  ! Name of file relative to $work/INPUT  Used only when equilibrium_t_option='from_file'
+
+   real :: slab_heating_rate = 1e-5 ! negative means unit is 1 K per `slab_heating_rate` days; positive means K/s
+   integer :: slab_heating_level = 24
+   real :: slab_heating_x1 = 0.         ! degrees longitude start
+   real :: slab_heating_x2 = 360.       ! degrees longitude end
+   real :: slab_heating_y1 = -90.        ! degrees latitude start
+   real :: slab_heating_y2 = 90.        ! degrees latitude end
    
 !-----------------------------------------------------------------------
 
@@ -79,7 +86,10 @@ private
                               local_heating_vert_decay, local_heating_option,&
                               local_heating_file, relax_to_specified_wind,   &
                               u_wind_file, v_wind_file, equilibrium_t_option,&
-                              equilibrium_t_file
+                              equilibrium_t_file,                            &
+                              slab_heating_rate, slab_heating_level,         &
+                              slab_heating_x1, slab_heating_x2,  &
+                              slab_heating_y1, slab_heating_y2
 
 !-----------------------------------------------------------------------
 
@@ -92,6 +102,7 @@ private
    integer :: id_teq, id_tdt, id_udt, id_vdt, id_tdt_diss, id_diss_heat, id_local_heating, id_newtonian_damping
    real    :: missing_value = -1.e10
    real    :: xwidth, ywidth, xcenter, ycenter ! namelist values converted from degrees to radians
+   real    :: x1,x2,y1,y2 ! namelist valuse converted from degrees to radians
    real    :: srfamp ! local_heating_srfamp converted from deg/day to deg/sec
    character(len=14) :: mod_name = 'hs_forcing'
 
@@ -272,6 +283,12 @@ contains
 !     ----- Make sure xcenter falls in the range zero to 2*PI -----
 
       xcenter = xcenter - twopi*floor(xcenter/twopi)
+
+!++ZS [072816]
+      x1  = slab_heating_x1*PI/180.
+      x2  = slab_heating_x2*PI/180.
+      y1 = slab_heating_y1*PI/180.
+      y2 = slab_heating_y2*PI/180.
 
 !     ----- convert local_heating_srfamp from deg/day to deg/sec ----
 
@@ -627,6 +644,12 @@ else if(trim(local_heating_option) == 'Isidoro') then
      enddo
    enddo
    enddo
+!ZS++ [072816]: slab_heating
+else if(trim(local_heating_option) == 'slab') then
+   where (lon(:,:)>=x1 .and. lon(:,:)<=x2 .and. lat(:,:)>=y1 .and. lat(:,:)<=y2)
+      tdt(:,:,slab_heating_level) = slab_heating_rate
+   endwhere
+!ZS--
 else
   call error_mesg ('hs_forcing_nml','"'//trim(local_heating_option)//'"  is not a valid value for local_heating_option',FATAL)
 endif
@@ -636,7 +659,7 @@ end subroutine local_heating
 !#######################################################################
 
 
-!#######################################################################
+!######################################################################e
 
 subroutine get_zonal_mean_flow ( Time, p_half, uz, vz)
 
